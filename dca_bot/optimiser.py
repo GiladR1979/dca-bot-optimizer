@@ -6,8 +6,8 @@ from .simulator import calc_metrics
 
 def grid_search(df, grid):
     log = logging.getLogger("opt")
-    best=None; best_m=None
-    safe=None; safe_m=None
+    best = safe = fast = None
+    best_m = safe_m = fast_m = None
     for combo in itertools.product(*grid.values()):
         params=dict(zip(grid.keys(),combo))
         
@@ -24,4 +24,8 @@ def grid_search(df, grid):
             best,best_m=params,m
         if not safe_m or m['max_drawdown_pct']<safe_m['max_drawdown_pct']:
             safe,safe_m=params,m
-    return {'best':(best,best_m),'safe':(safe,safe_m)}
+        if not fast_m or m['avg_deal_min'] < fast_m['avg_deal_min']:
+            fast, fast_m = params, m
+        return {'best': (best, best_m),
+                'safe': (safe, safe_m),
+                'fast': (fast, fast_m)}
