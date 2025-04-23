@@ -113,7 +113,7 @@ def make_objective(prices):
         spacing   = trial.suggest_float("spacing_pct", 0.3, 2.0, step=0.1)
         tp        = trial.suggest_float("tp_pct",     0.5, 3.0, step=0.1)
         trailing  = trial.suggest_categorical("trailing", [True, False])
-        trail_pct = trial.suggest_float("trailing_pct", 0.1, 0.5, step=0.1)
+        trail_pct = trial.suggest_float("trailing_pct", 0.1, 0.1, step=0.1)
 
         if trailing and tp - trail_pct < 0.5 - 1e-9:
             raise optuna.TrialPruned()
