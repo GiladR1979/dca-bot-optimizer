@@ -1,9 +1,13 @@
-import argparse, json, logging, os, optuna
+"""
+CLI – full-engine Optuna optimiser with early pruning & SQLite lock fix.
+"""
+
+import argparse, json, logging, os, optuna, sys
 from ..loader import load_binance
 from ..optuna_search import run_optuna
-from ..plotting import equity_curve, panel
 from ..strategies.dca_ts import DCATrailingStrategy
 from ..simulator import calc_metrics
+from ..plotting import equity_curve, panel
 
 RES = os.path.join(os.path.dirname(__file__), "..", "..", "results")
 os.makedirs(RES, exist_ok=True)
@@ -18,30 +22,32 @@ def run_set(params, df, label, base):
 
 
 def main():
-    pa = argparse.ArgumentParser(description="Optuna fast optimiser")
+    pa = argparse.ArgumentParser(description="Optuna optimiser (full engine)")
     pa.add_argument("symbol"); pa.add_argument("start"); pa.add_argument("end")
     pa.add_argument("--trials", type=int, default=200)
     pa.add_argument("--jobs", type=int, default=0)
     pa.add_argument("--storage", default="sqlite:///dca.sqlite",
-                    help="Optuna storage URI (default: sqlite:///dca.sqlite)")
+                    help="Optuna storage URI or 'none' for in-memory")
     pa.add_argument("-v", "--verbose", action="store_true")
     args = pa.parse_args()
+    if args.storage.lower() == "none":
+        args.storage = None
 
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                         format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     log = logging.getLogger("optuna-cli")
 
-    # --- data ------------------------------------------------------
     df = load_binance(args.symbol, args.start, args.end, "1m")
+    if df.empty:
+        sys.exit("No candles returned. Check symbol or date range.")
 
-    # --- default baseline -----------------------------------------
     default_params = dict(spacing_pct=1, tp_pct=0.6,
                           trailing=True, trailing_pct=0.1)
     met_def, png_def, item_def = run_set(default_params, df,
                                          "default", args.symbol)
 
-    # --- optimisation ---------------------------------------------
-    study = run_optuna(df, n_trials=args.trials,
+    study = run_optuna(df,
+                       n_trials=args.trials,
                        n_jobs=args.jobs,
                        storage=args.storage)
 
@@ -71,14 +77,14 @@ def main():
 
     summary = {
         "default": {"params": default_params, "metrics": met_def, "png": png_def},
-        "best":    {"params": best, "metrics": met_best, "png": png_best},
-        "safe":    {"params": safe, "metrics": met_safe, "png": png_safe},
-        "fast":    {"params": fast, "metrics": met_fast, "png": png_fast},
+        "best":    {"params": best,  "metrics": met_best,  "png": png_best},
+        "safe":    {"params": safe,  "metrics": met_safe,  "png": png_safe},
+        "fast":    {"params": fast,  "metrics": met_fast,  "png": png_fast},
         "triple":  trip_png
     }
     print(json.dumps(summary, indent=2))
-    with open(os.path.join(RES, f"{args.symbol}_optuna_summary.json"),
-              "w", encoding="utf-8") as f:
+    with open(os.path.join(
+            RES, f"{args.symbol}_optuna_summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
 

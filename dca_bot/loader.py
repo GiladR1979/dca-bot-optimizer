@@ -79,7 +79,7 @@ def load_binance(symbol, start, end, interval="1m"):
         have_start = have_end = None
 
     need_front = start_dt < have_start if have_start is not None else False
-    need_back  = end_dt   > have_end   if have_end   is not None else False
+    need_back = end_dt > have_end if have_end is not None else True
 
     # ------------------------------------------------ download gaps
     frames = [cached]

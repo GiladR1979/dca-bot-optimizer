@@ -1,164 +1,137 @@
 """
-Optuna helper — Bayesian optimisation with multi-CPU + Numba acceleration.
+Optuna helper – full Python DCATrailingStrategy, early pruning,
+multi-CPU, and SQLite lock timeout.  Works on Optuna < 3.4.
+
+The quick-test slice is resampled to **30-minute** candles so
+millions of 1-minute bars no longer bottleneck the pruning pass.
 """
 
+from __future__ import annotations
 import logging
 import os
+from typing import Optional, Tuple
 
-import numpy as np
 import optuna
+import pandas as pd
+import sqlalchemy
+import sqlalchemy.pool
 
-try:
-    from numba import njit
-except ImportError:  # NumPy fallback if Numba missing
-    njit = lambda *a, **k: (lambda f: f)
-
-from .simulator import calc_metrics         # only for ROI/DD math
+from .strategies.dca_ts import DCATrailingStrategy
+from .simulator import calc_metrics
 
 
 # ------------------------------------------------------------------ #
-#  Numba-JIT back-test (vectorised outer loop)                       #
+#  Helper to run one full strategy                                   #
 # ------------------------------------------------------------------ #
-@njit(fastmath=True, cache=True)
-def dca_loop(prices: np.ndarray,
-             spacing: float, tp: float,
-             trailing: int, trailing_gap: float):
+def _evaluate(df: pd.DataFrame,
+              spacing: float, tp: float,
+              trailing: bool, trail_pct: float
+              ) -> Tuple[float, float, float]:
+    """Run canonical strategy and return (annual%, dd%, avg_len)."""
+    bot = DCATrailingStrategy(
+        spacing_pct=spacing,
+        tp_pct=tp,
+        trailing=trailing,
+        trailing_pct=trail_pct,
+    )
+    deals, eq = bot.backtest(df)
+    m = calc_metrics(deals, eq)
+    return m["annual_pct"], m["max_drawdown_pct"], m["avg_deal_min"]
+
+
+# ------------------------------------------------------------------ #
+#  Objective with early pruning                                      #
+# ------------------------------------------------------------------ #
+def make_objective(df_full: pd.DataFrame):
     """
-    Very small, numba-friendly DCA engine.
-
-    Returns: annual_% , max_dd_% , avg_deal_min
+    * Quick head-run uses 30-minute bars (1/6th of the data volume).
+    * MedianPruner can therefore discard ~60 % hopeless trials fast.
     """
-    cash = 1000.0
-    qty = 0.0
-    avg = 0.0
-    peak_eq = cash
-    max_dd = 0.0
-    deals = 0
-    deal_len_sum = 0
-    deal_open_idx = -1
+    head = (df_full.resample("30min").first()
+                     .iloc[: max(300, len(df_full) // 10)])
 
-    n = prices.shape[0]
-    for i in range(n):
-        p = prices[i]
-
-        # open first deal immediately
-        if qty == 0.0:
-            buy_cost = cash / 51.0          # base $19.61
-            qty += buy_cost / p
-            cash -= buy_cost
-            avg = p
-            dca_level = avg * (1 - spacing / 100)
-            tp_price = avg * (1 + tp / 100)
-            trail_armed = False
-            trail_high = 0.0
-            deal_open_idx = i
-
-        # DCA buy
-        if p <= dca_level and qty < (51 / 50) * (cash / p):
-            buy_cost = cash / 50.0
-            qty += buy_cost / p
-            cash -= buy_cost
-            avg = (avg * (qty - buy_cost / p) + buy_cost) / qty
-            dca_level = avg * (1 - spacing / 100)
-            tp_price = avg * (1 + tp / 100)
-            trail_armed = False
-            trail_high = 0.0
-
-        # update trailing
-        if trailing and qty > 0:
-            if p >= tp_price and not trail_armed:
-                trail_armed = True
-                trail_high = p
-            if trail_armed:
-                if p > trail_high:
-                    trail_high = p
-                stop = trail_high * (1 - trailing_gap / 100)
-                if p <= stop:
-                    cash += qty * p          # sell all
-                    qty = 0
-                    deals += 1
-                    deal_len_sum += (i - deal_open_idx)
-                    continue  # next candle
-
-        # take-profit without trailing
-        if not trailing and p >= tp_price and qty > 0:
-            cash += qty * p
-            qty = 0
-            deals += 1
-            deal_len_sum += (i - deal_open_idx)
-
-        # equity / DD
-        eq = cash + qty * p
-        if eq > peak_eq:
-            peak_eq = eq
-        dd = (peak_eq - eq) / peak_eq
-        if dd > max_dd:
-            max_dd = dd
-
-    # final equity (ignore open deal)
-    final_eq = cash
-    roi_pct = (final_eq - 1000.0) / 10.0     # % vs 1 000
-    days = n / 1440.0
-    annual_pct = ((1 + roi_pct / 100) ** (365 / days) - 1) * 100 if days else 0
-    avg_deal_min = deal_len_sum / deals if deals else n
-    return annual_pct, max_dd * 100, avg_deal_min
-
-
-# ------------------------------------------------------------------ #
-#  Optuna wrapper                                                    #
-# ------------------------------------------------------------------ #
-def make_objective(prices):
-    """Factory so we capture the NumPy array once, not per trial."""
-    def _objective(trial):
+    def _objective(trial: optuna.Trial):
+        # --- sample parameters ------------------------------------
         spacing   = trial.suggest_float("spacing_pct", 0.3, 2.0, step=0.1)
         tp        = trial.suggest_float("tp_pct",     0.5, 3.0, step=0.1)
         trailing  = trial.suggest_categorical("trailing", [True, False])
-        trail_pct = trial.suggest_float("trailing_pct", 0.1, 0.1, step=0.1)
+        trail_pct = trial.suggest_float("trailing_pct", 0.1, 0.5, step=0.1)
 
+        # enforce effective TP ≥ 0.5 %
         if trailing and tp - trail_pct < 0.5 - 1e-9:
             raise optuna.TrialPruned()
 
-        annual, dd, avg_len = dca_loop(
-            prices, spacing, tp, int(trailing), trail_pct)
+        # --- quick 30-min head run --------------------------------
+        annual_head, *_ = _evaluate(head,
+                                    spacing, tp, trailing, trail_pct)
+        trial.report(-annual_head, step=0)     # minimise
+        if trial.should_prune():
+            raise optuna.TrialPruned()
 
-        m = {
+        # --- full back-test ---------------------------------------
+        annual, dd, avg = _evaluate(df_full,
+                                    spacing, tp, trailing, trail_pct)
+
+        trial.set_user_attr("metrics", {
             "annual_pct": annual,
             "max_drawdown_pct": dd,
-            "avg_deal_min": avg_len
-        }
-        trial.set_user_attr("metrics", m)
+            "avg_deal_min": avg
+        })
         trial.set_user_attr("params", {
             "spacing_pct": spacing,
             "tp_pct": tp,
             "trailing": trailing,
             "trailing_pct": trail_pct
         })
-        return -annual   # minimise
+        return -annual                                    # minimise
+
     return _objective
 
 
-def run_optuna(df, *, n_trials=200, n_jobs=None,
-               storage=None, seed=42):
-    """
-    df : DataFrame with 'close' column
-    n_jobs : 0/None ⇒ all logical cores
-    storage: sqlite:///…  for persistence & multi-proc locking
-    """
+# ------------------------------------------------------------------ #
+#  Create + run Optuna study                                         #
+# ------------------------------------------------------------------ #
+def run_optuna(df: pd.DataFrame, *,
+               n_trials: int = 200,
+               n_jobs: Optional[int] = None,
+               storage: Optional[str] = None,
+               seed: int = 42):
+
     if n_jobs in (None, 0):
         n_jobs = os.cpu_count()
 
-    prices = df["close"].values.astype(np.float64)
-
-    study = optuna.create_study(
-        direction="minimize",
-        sampler=optuna.samplers.TPESampler(seed=seed),
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=20),
-        storage=storage,
-        load_if_exists=bool(storage),
+    sampler = optuna.samplers.TPESampler(seed=seed)
+    pruner  = optuna.pruners.MedianPruner(
+        n_startup_trials=10,     # start pruning sooner
+        n_warmup_steps=0,
+        interval_steps=1,
     )
 
-    logging.info("Optuna | trials=%d | jobs=%d", n_trials, n_jobs)
-    study.optimize(make_objective(prices),
+    # ---------- SQLite storage with 60 s lock timeout -------------
+    if storage:
+        engine_kw = {
+            "connect_args": {"timeout": 60, "check_same_thread": False},
+            "poolclass": sqlalchemy.pool.NullPool,
+        }
+        storage_obj = optuna.storages.RDBStorage(
+            url=storage,
+            engine_kwargs=engine_kw,
+        )
+    else:
+        storage_obj = None  # in-memory (fastest, non-resumable)
+
+    logging.info("Optuna | trials=%d | jobs=%d | storage=%s",
+                 n_trials, n_jobs, storage or "memory")
+
+    study = optuna.create_study(
+        study_name="dca_full",
+        direction="minimize",
+        sampler=sampler,
+        pruner=pruner,
+        storage=storage_obj,
+        load_if_exists=bool(storage_obj),
+    )
+    study.optimize(make_objective(df),
                    n_trials=n_trials,
                    n_jobs=n_jobs,
                    show_progress_bar=True)
