@@ -15,7 +15,7 @@ import pandas as pd
 import sqlalchemy
 import sqlalchemy.pool
 
-from .strategies.dca_ts import DCATrailingStrategy
+from .strategies.dca_ts_numba import DCAJITStrategy as DCATrailingStrategy
 from .simulator import calc_metrics
 
 
