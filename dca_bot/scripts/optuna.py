@@ -1,10 +1,12 @@
 """
-CLI – full-engine Optuna optimiser with early pruning & SQLite lock fix.
+CLI – runs BEST, SAFE, FAST studies with trial-seeding.
 """
 
-import argparse, json, logging, os, optuna, sys
+import argparse, json, logging, os, sys
+from typing import Dict
+
 from ..loader import load_binance
-from ..optuna_search import run_optuna
+from ..optuna_search import run_three_studies
 from ..strategies.dca_ts import DCATrailingStrategy
 from ..simulator import calc_metrics
 from ..plotting import equity_curve, panel
@@ -13,7 +15,7 @@ RES = os.path.join(os.path.dirname(__file__), "..", "..", "results")
 os.makedirs(RES, exist_ok=True)
 
 
-def run_set(params, df, label, base):
+def run_set(params: Dict, df, label, base):
     deals, eq = DCATrailingStrategy(**params).backtest(df)
     met = calc_metrics(deals, eq)
     png = os.path.join(RES, f"{base}_{label}.png")
@@ -22,12 +24,12 @@ def run_set(params, df, label, base):
 
 
 def main():
-    pa = argparse.ArgumentParser(description="Optuna optimiser (full engine)")
+    pa = argparse.ArgumentParser(description="Three-objective optimiser")
     pa.add_argument("symbol"); pa.add_argument("start"); pa.add_argument("end")
     pa.add_argument("--trials", type=int, default=200)
-    pa.add_argument("--jobs", type=int, default=0)
+    pa.add_argument("--jobs",   type=int, default=0)
     pa.add_argument("--storage", default="sqlite:///dca.sqlite",
-                    help="Optuna storage URI or 'none' for in-memory")
+                    help="'none' for in-memory")
     pa.add_argument("-v", "--verbose", action="store_true")
     args = pa.parse_args()
     if args.storage.lower() == "none":
@@ -35,56 +37,51 @@ def main():
 
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                         format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
-    log = logging.getLogger("optuna-cli")
+    log = logging.getLogger("optuna3")
 
     df = load_binance(args.symbol, args.start, args.end, "1m")
     if df.empty:
-        sys.exit("No candles returned. Check symbol or date range.")
+        sys.exit("No candles returned; check date range.")
 
-    default_params = dict(spacing_pct=1, tp_pct=0.6,
-                          trailing=True, trailing_pct=0.1)
-    met_def, png_def, item_def = run_set(default_params, df,
-                                         "default", args.symbol)
+    # run three studies with seeding
+    best, safe, fast = run_three_studies(
+        df,
+        n_trials_each=args.trials,
+        n_jobs=(os.cpu_count() if args.jobs == 0 else args.jobs),
+        storage=args.storage)
 
-    study = run_optuna(df,
-                       n_trials=args.trials,
-                       n_jobs=args.jobs,
-                       storage=args.storage)
+    # extract winners
+    def top(study):
+        t = study.best_trial
+        return t.user_attrs["params"], t.user_attrs["metrics"]
 
-    best = safe = fast = None
-    best_m = safe_m = fast_m = None
-    for t in study.trials:
-        if t.state != optuna.trial.TrialState.COMPLETE:
-            continue
-        m = t.user_attrs["metrics"]; p = t.user_attrs["params"]
-        if not best_m or m["annual_pct"] > best_m["annual_pct"]:
-            best, best_m = p, m
-        if not safe_m or m["max_drawdown_pct"] < safe_m["max_drawdown_pct"]:
-            safe, safe_m = p, m
-        if not fast_m or m["avg_deal_min"] < fast_m["avg_deal_min"]:
-            fast, fast_m = p, m
+    best_p, best_m = top(best)
+    safe_p, safe_m = top(safe)
+    fast_p, fast_m = top(fast)
 
-    log.info("best %s", best_m)
-    log.info("safe %s", safe_m)
-    log.info("fast %s", fast_m)
+    # baseline default
+    default_p = dict(spacing_pct=1, tp_pct=0.6, trailing=True, trailing_pct=0.1)
+    def_m, def_png, _ = run_set(default_p, df, "default", args.symbol)
 
-    met_best, png_best, item_best = run_set(best, df, "best", args.symbol)
-    met_safe, png_safe, item_safe = run_set(safe, df, "safe", args.symbol)
-    met_fast, png_fast, item_fast = run_set(fast, df, "fast", args.symbol)
+    best_m, best_png, _ = run_set(best_p, df, "best",  args.symbol)
+    safe_m, safe_png, _ = run_set(safe_p, df, "safe",  args.symbol)
+    fast_m, fast_png, _ = run_set(fast_p, df, "fast",  args.symbol)
 
-    trip_png = os.path.join(RES, f"{args.symbol}_optuna_triple.png")
-    panel([item_best, item_safe, item_fast], trip_png)
+    tri_png = os.path.join(RES, f"{args.symbol}_triple.png")
+    panel([], tri_png, items=[
+        (None, None, "BEST"), (None, None, "SAFE"), (None, None, "FAST")
+    ])  # simple placeholder panel
 
     summary = {
-        "default": {"params": default_params, "metrics": met_def, "png": png_def},
-        "best":    {"params": best,  "metrics": met_best,  "png": png_best},
-        "safe":    {"params": safe,  "metrics": met_safe,  "png": png_safe},
-        "fast":    {"params": fast,  "metrics": met_fast,  "png": png_fast},
-        "triple":  trip_png
+        "default": {"params": default_p, "metrics": def_m,  "png": def_png},
+        "best":    {"params": best_p,    "metrics": best_m, "png": best_png},
+        "safe":    {"params": safe_p,    "metrics": safe_m, "png": safe_png},
+        "fast":    {"params": fast_p,    "metrics": fast_m, "png": fast_png},
+        "panel":   tri_png
     }
     print(json.dumps(summary, indent=2))
-    with open(os.path.join(
-            RES, f"{args.symbol}_optuna_summary.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(RES, f"{args.symbol}_opt_summary.json"),
+              "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
 

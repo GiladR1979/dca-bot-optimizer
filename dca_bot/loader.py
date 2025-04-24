@@ -20,18 +20,60 @@ os.makedirs(DATA_DIR, exist_ok=True)
 log = logging.getLogger("loader")
 
 
-def _klines(symbol, start_ms, end_ms, interval="1m"):
+import requests
+from requests.adapters import HTTPAdapter, Retry
+
+def _klines(symbol: str,
+            start_ms: int,
+            end_ms: int,
+            interval: str = "1m"):
+    """
+    Fetch up to 1000 klines in one call with automatic retries and
+    exponential back‑off.  Raises after 5 failed attempts.
+    """
     url = "https://api.binance.com/api/v3/klines"
+
+    session = requests.Session()
+    session.mount(
+        "https://",
+        HTTPAdapter(
+            max_retries=Retry(
+                total=5,
+                backoff_factor=1.5,                # 1.5 s, 3 s, 4.5 s …
+                status_forcelist=[429, 500, 502, 503, 504],
+                allowed_methods=["GET"],
+            )
+        ),
+    )
+
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "startTime": start_ms,
+        "endTime": end_ms,
+        "limit": 1000,
+    }
+
     data, cur = [], start_ms
     while cur < end_ms:
-        r = requests.get(url, params={
-            "symbol": symbol,
-            "interval": interval,
-            "startTime": cur,
-            "endTime": end_ms,
-            "limit": 1000
-        }, timeout=15)
-        r.raise_for_status()
+        try:
+            r = session.get(url, params=params | {"startTime": cur}, timeout=30)
+            r.raise_for_status()
+        except (requests.exceptions.ReadTimeout,
+                requests.exceptions.ConnectionError) as err:
+            # manual back‑off for rare SSL / DNS stalls
+            for attempt in range(1, 6):
+                wait = 2 ** attempt            # 2, 4, 8, 16, 32 s
+                print(f"Timeout – retry {attempt}/5 in {wait}s …")
+                time.sleep(wait)
+                try:
+                    r = session.get(url, params=params | {"startTime": cur}, timeout=30)
+                    r.raise_for_status()
+                    break
+                except Exception:
+                    continue
+            else:
+                raise err
         batch = r.json()
         if not batch:
             break
@@ -41,7 +83,6 @@ def _klines(symbol, start_ms, end_ms, interval="1m"):
                  len(data) // 1000,
                  len(batch),
                  datetime.utcfromtimestamp(batch[-1][0] / 1000))
-        # be polite
         time.sleep(0.03)
     return data
 
@@ -71,15 +112,24 @@ def load_binance(symbol, start, end, interval="1m"):
 
     # ------------------------------------------------ cache hit?
     if os.path.exists(cache_file):
-        cached = pd.read_csv(cache_file, parse_dates=["ts"], index_col="ts")
-        have_start = cached.index.min()
-        have_end   = cached.index.max()
+        try:
+            cached = pd.read_csv(cache_file, parse_dates=["ts"], index_col="ts")
+        except (ValueError, KeyError, pd.errors.EmptyDataError):
+            log.warning("Ignoring malformed cache %s", cache_file)
+            cached = pd.DataFrame()
+        have_start = cached.index.min() if not cached.empty else None
+        have_end   = cached.index.max() if not cached.empty else None
     else:
         cached = pd.DataFrame()
         have_start = have_end = None
 
-    need_front = start_dt < have_start if have_start is not None else False
-    need_back = end_dt > have_end if have_end is not None else True
+    if have_start is None and have_end is None:
+        # no cache at all → one single pass from start → end
+        need_front = True
+        need_back  = False          # << stop the second duplicate loop
+    else:
+        need_front = start_dt < have_start
+        need_back  = end_dt   > have_end
 
     # ------------------------------------------------ download gaps
     frames = [cached]
@@ -107,6 +157,9 @@ def load_binance(symbol, start, end, interval="1m"):
     full = full[~full.index.duplicated(keep="last")]
 
     # ------------------------------------------------ save cache
-    full.to_csv(cache_file)
-    log.info("Cache updated → %s (rows: %d)", cache_file, len(full))
+    if len(full):
+        full.to_csv(cache_file)
+        log.info("Cache updated → %s (rows: %d)", cache_file, len(full))
+    else:
+        log.warning("Download returned 0 rows – cache not written.")
     return full
