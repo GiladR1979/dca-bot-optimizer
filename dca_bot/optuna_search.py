@@ -39,29 +39,56 @@ def _evaluate(df: pd.DataFrame,
 # ------------------------------------------------------------------ #
 #  objective factory                                                #
 # ------------------------------------------------------------------ #
+# ------------------------------------------------------------------ #
+#  objective factory – returns a function Optuna can optimise        #
+# ------------------------------------------------------------------ #
 def make_objective(df_full: pd.DataFrame, metric_key: str):
-    head = (df_full.resample("30min").first()
-                     .iloc[: max(300, len(df_full) // 10)])
+    """
+    Build a single-metric Optuna objective.
+
+    Parameters
+    ----------
+    df_full : pd.DataFrame
+        The full 1-minute price history.
+    metric_key : str
+        Which metric to optimise:
+        • "annual_pct"         – maximise (profit)
+        • "max_drawdown_pct"   – minimise (risk)
+        • "avg_deal_min"       – minimise (speed)
+
+    Returns
+    -------
+    Callable[[optuna.Trial], float]
+        Objective that Optuna will call.
+    """
+    # quick 30-minute resample head for pruning
+    head = (
+        df_full
+        .resample("30min").first()
+        .iloc[: max(300, len(df_full) // 10)]
+    )
 
     def _objective(trial: optuna.Trial):
         spacing   = trial.suggest_float("spacing_pct", 0.3, 2.0, step=0.1)
         tp        = trial.suggest_float("tp_pct",     0.5, 3.0, step=0.1)
         trailing  = trial.suggest_categorical("trailing", [True, False])
-        trail_pct = trial.suggest_float("trailing_pct", 0.1, 0.1)
+        trail_pct = trial.suggest_float("trailing_pct", 0.1, 0.1, step=0.1)
 
+        # invalidate combos where trailing SL is larger than TP
         if trailing and tp - trail_pct < 0.5 - 1e-9:
             raise optuna.TrialPruned()
 
-        # --- quick head run for pruning ---------------------------
+        # ---------- fast head-run for early pruning ----------------
         m_head = _evaluate(head, spacing, tp, trailing, trail_pct)
-        trial.report(m_head[metric_key] if metric_key != "annual_pct"
-                     else -m_head["annual_pct"], step=0)
+        trial.report(m_head[metric_key], step=0)     # **no negation**
+
         if trial.should_prune():
             raise optuna.TrialPruned()
 
-        # --- full run --------------------------------------------
+        # ---------- full back-test --------------------------------
         m = _evaluate(df_full, spacing, tp, trailing, trail_pct)
 
+        # keep full metrics & params for later inspection
         trial.set_user_attr("metrics", m)
         trial.set_user_attr("params", {
             "spacing_pct": spacing,
@@ -70,9 +97,8 @@ def make_objective(df_full: pd.DataFrame, metric_key: str):
             "trailing_pct": trail_pct,
         })
 
-        if metric_key == "annual_pct":
-            return -m["annual_pct"]
-        return m[metric_key]   # draw-down or avg_deal_min
+        # return the metric to optimise (sign already correct)
+        return m["annual_pct"] if metric_key == "annual_pct" else m[metric_key]
 
     return _objective
 
