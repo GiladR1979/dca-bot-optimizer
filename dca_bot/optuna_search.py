@@ -47,7 +47,7 @@ def make_objective(df_full: pd.DataFrame, metric_key: str):
         spacing   = trial.suggest_float("spacing_pct", 0.3, 2.0, step=0.1)
         tp        = trial.suggest_float("tp_pct",     0.5, 3.0, step=0.1)
         trailing  = trial.suggest_categorical("trailing", [True, False])
-        trail_pct = trial.suggest_float("trailing_pct", 0.1, 0.5, step=0.1)
+        trail_pct = trial.suggest_categorical("trailing_pct", [0.1])
 
         if trailing and tp - trail_pct < 0.5 - 1e-9:
             raise optuna.TrialPruned()
@@ -138,7 +138,7 @@ def run_three_studies(df: pd.DataFrame,
                       storage: Optional[str]):
 
     # ---------- BEST (annual %) -----------------------------------
-    study_best = _new_study("dca_best", "minimize", storage)
+    study_best = _new_study("dca_best", "maximize", storage)
     study_best.optimize(make_objective(df, "annual_pct"),
                         n_trials=n_trials_each,
                         n_jobs=n_jobs,
