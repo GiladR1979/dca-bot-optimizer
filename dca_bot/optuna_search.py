@@ -19,6 +19,8 @@ import math
 from .strategies.dca_ts_numba import DCAJITStrategy as DCATrailingStrategy
 from .simulator import calc_metrics
 
+_seen_bests = set()
+
 
 # ------------------------------------------------------------------ #
 #  one full back-test                                               #
@@ -74,6 +76,13 @@ def make_objective(df_full: pd.DataFrame, metric_key: str):
         tp        = trial.suggest_float("tp_pct",     0.5, 3.0, step=0.1)
         trailing  = trial.suggest_categorical("trailing", [True, False])
         trail_pct = trial.suggest_float("trailing_pct", 0.1, 0.1, step=0.1)
+
+        # --------- NEW: skip duplicates --------------------------------
+        key = (spacing, tp, trailing)  # trailing_pct fixed at 0.1
+        if key in _seen_bests:
+            raise optuna.TrialPruned()
+        _seen_bests.add(key)
+        # ---------------------------------------------------------------
 
         # invalidate combos where trailing SL is larger than TP
         if trailing and tp - trail_pct < 0.5 - 1e-9:
