@@ -14,6 +14,7 @@ import optuna
 import pandas as pd
 import sqlalchemy
 import sqlalchemy.pool
+import math
 
 from .strategies.dca_ts_numba import DCAJITStrategy as DCATrailingStrategy
 from .simulator import calc_metrics
@@ -144,6 +145,8 @@ def seed_from(source: optuna.study.Study,
         m  = t.user_attrs["metrics"]
         p  = t.user_attrs["params"]
         val = -m["annual_pct"] if metric_key == "annual_pct" else m[metric_key]
+        if val is None or (isinstance(val, float) and math.isnan(val)):
+            continue
 
         cloned = optuna.trial.create_trial(
             params=p,
