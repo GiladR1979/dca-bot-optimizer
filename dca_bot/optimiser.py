@@ -26,6 +26,6 @@ def grid_search(df, grid):
             safe,safe_m=params,m
         if not fast_m or m['avg_deal_min'] < fast_m['avg_deal_min']:
             fast, fast_m = params, m
-        return {'best': (best, best_m),
-                'safe': (safe, safe_m),
-                'fast': (fast, fast_m)}
+    return {'best': (best, best_m),
+            'safe': (safe, safe_m),
+            'fast': (fast, fast_m)}

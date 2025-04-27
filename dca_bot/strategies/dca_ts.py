@@ -48,7 +48,7 @@ class DCATrailingStrategy:
                 qty_buy=usd/price
                 cash-=usd+fee; qty+=qty_buy; cost+=usd+fee
                 dca_count+=1; last_dca_ts=epoch
-                avg_price = ((avg_price*(dca_count))+price)/(dca_count+1)
+                avg_price = (avg_price * qty + price * qty_buy) / (qty + qty_buy)
                 next_buy=price*(1-self.spacing_pct/100)
 
             if price>=avg_price*(1+self.tp_pct/100):

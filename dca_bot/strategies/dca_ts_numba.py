@@ -1,10 +1,9 @@
 """
-Numba-accelerated fixed-interval DCA strategy (Python 3.9 compatible).
-
-Key fix vs. previous revision
------------------------------
-* Inside `_run_loop_nb` we now use `numba.typed.List` to collect rows
-  instead of `np.vstack`, avoiding the dimension-mismatch TypingError.
+Numba‑accelerated fixed‑interval DCA strategy
+------------------------------------------------
+• correct per‑deal profit (was cumulative cash)
+• proper qty‑weighted average price
+• fee handling (default 0.1 %) identical to the pure‑Python version
 """
 
 from __future__ import annotations
@@ -25,14 +24,16 @@ class DCAJITStrategy:
     trailing_pct: float = 0.1
     max_safety: int = 50
     usd_per_order: float = 1000 / 51.0
+    fee_rate: float = 0.001  # exchange taker fee (0.1 %)
 
     # ------------------------------------------------------------------ #
-    def backtest(self, df: pd.DataFrame
-                 ) -> Tuple[List[Tuple[int, int, float, float]],
-                            List[Tuple[int, float]]]:
+    def backtest(
+        self, df: pd.DataFrame
+    ) -> Tuple[List[Tuple[int, int, float, float]], List[Tuple[int, float]]]:
+        """Run the strategy on a DataFrame of 1‑minute candles."""
 
         close = df["close"].to_numpy(np.float64)
-        ts    = df.index.view("int64") // 1_000_000_000  # to seconds
+        ts = df.index.view("int64") // 1_000_000_000  # epoch seconds
 
         deals_rows, equity_rows = _run_loop_nb(
             ts,
@@ -43,37 +44,51 @@ class DCAJITStrategy:
             self.trailing_pct,
             self.max_safety,
             self.usd_per_order,
+            self.fee_rate,
         )
 
         # ---------- convert typed lists back to Python lists ------------
-        deals  = [(int(r[0]), int(r[1]), float(r[2]), 0.0) for r in deals_rows]
-        equity = [(int(r[0]), float(r[1]))               for r in equity_rows]
+        deals = [
+            (int(r[0]), int(r[1]), float(r[2]), float(r[3])) for r in deals_rows
+        ]
+        equity = [(int(r[0]), float(r[1])) for r in equity_rows]
         return deals, equity
 
 
 # =========================  JIT core  ================================= #
 
+
 @nb.njit(cache=True)
-def _run_loop_nb(ts, px,
-                 spacing_pct, tp_pct,
-                 trailing, trailing_pct,
-                 max_safety, usd_per_order):
+def _run_loop_nb(
+    ts: np.ndarray,
+    px: np.ndarray,
+    spacing_pct: float,
+    tp_pct: float,
+    trailing: bool,
+    trailing_pct: float,
+    max_safety: int,
+    usd_per_order: float,
+    fee_rate: float,
+):
+    """Core loop – fully JIT‑compiled by Numba."""
 
     n = len(px)
 
     # typed lists to avoid np.vstack inside JIT
-    deals  = NbList.empty_list(nb.float64[:] )
-    equity = NbList.empty_list(nb.float64[:] )
+    deals = NbList.empty_list(nb.float64[:])
+    equity = NbList.empty_list(nb.float64[:])
 
     in_trade = False
+
     entry_ts = 0
-    qty      = 0.0
-    avg      = 0.0
+    qty = 0.0
+    avg = 0.0
     next_buy = 0.0
     tp_price = 0.0
     trail_top = 0.0
     safety_cnt = 0
     cash = 0.0
+    cost = 0.0  # USD spent (incl. fees) in current deal
 
     for i in range(n):
         t = ts[i]
@@ -81,11 +96,14 @@ def _run_loop_nb(ts, px,
 
         # --------------- open first order ------------------------------
         if not in_trade:
-            qty   = usd_per_order / p
-            cash -= usd_per_order
-            avg   = p
-            next_buy = p * (1 - spacing_pct/100)
-            tp_price = p * (1 + tp_pct/100)
+            fee = usd_per_order * fee_rate
+            buy_qty = usd_per_order / p
+            qty = buy_qty
+            cash -= usd_per_order + fee
+            cost = usd_per_order + fee
+            avg = p
+            next_buy = p * (1 - spacing_pct / 100)
+            tp_price = p * (1 + tp_pct / 100)
             trail_top = 0.0
             safety_cnt = 0
             entry_ts = t
@@ -94,35 +112,46 @@ def _run_loop_nb(ts, px,
         # --------------- DCA buys --------------------------------------
         else:
             if safety_cnt < max_safety and p <= next_buy:
+                fee = usd_per_order * fee_rate
                 buy_qty = usd_per_order / p
+                # qty‑weighted average price
+                avg = (avg * qty + p * buy_qty) / (qty + buy_qty)
+
                 qty += buy_qty
-                cash -= usd_per_order
-                avg = (avg*(safety_cnt+1) + p) / (safety_cnt+2)
+                cash -= usd_per_order + fee
+                cost += usd_per_order + fee
                 safety_cnt += 1
-                next_buy = p * (1 - spacing_pct/100)
-                tp_price = avg * (1 + tp_pct/100)
+
+                next_buy = p * (1 - spacing_pct / 100)
+                tp_price = avg * (1 + tp_pct / 100)
                 trail_top = 0.0
 
         # --------------- TP / trailing ---------------------------------
+        exit_now = False
         if in_trade and p >= tp_price:
-            exit_now = False
             if trailing:
                 if p > trail_top:
                     trail_top = p
-                if trail_top > 0 and p <= trail_top*(1-trailing_pct/100):
+                if trail_top > 0 and p <= trail_top * (1 - trailing_pct / 100):
                     exit_now = True
             else:
                 exit_now = True
 
-            if exit_now:
-                cash += qty * p
-                pl = cash                          # profit in USD this deal
-                row = np.array((entry_ts, t, pl), dtype=np.float64)
-                deals.append(row)
+        if exit_now and in_trade:
+            proceeds = qty * p
+            fee = proceeds * fee_rate
+            cash += proceeds - fee
+            profit = (proceeds - fee) - cost  # P/L this deal
 
-                # reset
-                qty = avg = 0.0
-                in_trade = False
+            row = np.array((entry_ts, t, profit, fee), dtype=np.float64)
+            deals.append(row)
+
+            # reset state for the next deal
+            qty = 0.0
+            avg = 0.0
+            cost = 0.0
+            in_trade = False
+            trail_top = 0.0
 
         # --------------- equity curve ----------------------------------
         eq_row = np.array((t, cash + qty * p), dtype=np.float64)
