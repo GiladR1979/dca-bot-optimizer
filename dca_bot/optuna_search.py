@@ -227,11 +227,11 @@ def run_three_studies(
         show_progress_bar=True,
     )
 
-    # ---------- FAST (min avg time) ---------------------------------
-    study_fast = _new_study("dca_fast", "minimize", storage, symbol)
-    seed_from(study_best, study_fast, "avg_deal_min")
+    # ---------- FAST (max number of deals) --------------------------
+    study_fast = _new_study("dca_fast", "maximize", storage, symbol)
+    seed_from(study_best, study_fast, "deals")          # copy existing trials
     study_fast.optimize(
-        make_objective(df, "avg_deal_min"),
+        make_objective(df, "deals"),                    # optimise the “deals” metric
         n_trials=n_trials_each,
         n_jobs=n_jobs,
         show_progress_bar=True,
