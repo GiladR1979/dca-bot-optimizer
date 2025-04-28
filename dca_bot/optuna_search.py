@@ -12,6 +12,20 @@ from typing import Optional, Dict, Tuple
 
 import optuna
 import pandas as pd
+
+# ------------------------------------------------------------------ #
+#  duplicate‑trial guard (Optuna 2.x)                                #
+# ------------------------------------------------------------------ #
+_seen_params: set[tuple] = set()
+
+def _param_sig(spacing: float, tp: float, trailing: bool, trail_pct: float) -> tuple:
+    """Rounded signature so small FP noise does not count as new."""
+    return (
+        round(spacing, 3),
+        round(tp, 3),
+        bool(trailing),
+        round(trail_pct, 3),
+    )
 import sqlalchemy
 import sqlalchemy.pool
 
@@ -57,6 +71,12 @@ def make_objective(df_full: pd.DataFrame, metric_key: str):
         trailing = trial.suggest_categorical("trailing", [True, False])
         trail_pct = trial.suggest_float("trailing_pct", 0.1, 0.1, step=0.1)
 
+        # ---- skip exact‑duplicate parameter sets --------------------
+        sig = _param_sig(spacing, tp, trailing, trail_pct)
+        if sig in _seen_params:
+            raise optuna.TrialPruned()
+        _seen_params.add(sig)
+
         # invalidate combos where trailing SL is larger than TP
         if trailing and tp - trail_pct < 0.5 - 1e-9:
             raise optuna.TrialPruned()
@@ -85,6 +105,23 @@ def make_objective(df_full: pd.DataFrame, metric_key: str):
 
 
 # ------------------------------------------------------------------ #
+#  register existing trials in the duplicate cache                   #
+# ------------------------------------------------------------------ #
+def _register_trials(study: optuna.study.Study):
+    """Push signatures of all COMPLETE trials into _seen_params."""
+    for t in study.trials:
+        if t.state != optuna.trial.TrialState.COMPLETE:
+            continue
+        sig = _param_sig(
+            t.params.get("spacing_pct"),
+            t.params.get("tp_pct"),
+            t.params.get("trailing"),
+            t.params.get("trailing_pct"),
+        )
+        _seen_params.add(sig)
+
+
+# ------------------------------------------------------------------ #
 #  create / run a study                                              #
 # ------------------------------------------------------------------ #
 
@@ -93,7 +130,9 @@ def _new_study(base_name: str, direction: str, storage: Optional[str], symbol: s
 
     full_name = f"{base_name}_{symbol}"
     sampler = optuna.samplers.RandomSampler(seed=42)  # no duplicates
-    pruner = optuna.pruners.MedianPruner(n_startup_trials=10)
+    # Disable early‑stopping of “bad” trials for now
+    #pruner = optuna.pruners.MedianPruner(n_startup_trials=10)
+    pruner = optuna.pruners.NopPruner()
 
     if storage:
         engine_kw = {
@@ -104,7 +143,7 @@ def _new_study(base_name: str, direction: str, storage: Optional[str], symbol: s
     else:
         storage_obj = None
 
-    return optuna.create_study(
+    study = optuna.create_study(
         study_name=full_name,
         direction=direction,
         sampler=sampler,
@@ -112,6 +151,10 @@ def _new_study(base_name: str, direction: str, storage: Optional[str], symbol: s
         storage=storage_obj,
         load_if_exists=True,
     )
+    # make sure duplicates already in DB are remembered
+    _register_trials(study)
+
+    return study
 
 
 # ------------------------------------------------------------------ #
@@ -141,6 +184,15 @@ def seed_from(source: optuna.study.Study, dest: optuna.study.Study, metric_key: 
             state=optuna.trial.TrialState.COMPLETE,
         )
         dest.add_trial(cloned)
+
+        # register the cloned parameters so later samplers won't repeat them
+        sig = _param_sig(
+            cloned.params["spacing_pct"],
+            cloned.params["tp_pct"],
+            cloned.params["trailing"],
+            cloned.params["trailing_pct"],
+        )
+        _seen_params.add(sig)
 
 
 # ------------------------------------------------------------------ #

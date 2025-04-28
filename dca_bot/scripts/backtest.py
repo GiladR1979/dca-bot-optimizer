@@ -1,47 +1,45 @@
+import numpy as np
 
-import argparse, json, logging, os, matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from datetime import datetime
-from ..loader import load_binance
-from ..strategies.dca_ts import DCATrailingStrategy
-from ..simulator import calc_metrics
+def calc_metrics(deals, equity):
+    total_pl = sum(d[2] for d in deals)
 
-RESULTS_DIR=os.path.join(os.path.dirname(__file__),'..','..','results')
-os.makedirs(RESULTS_DIR,exist_ok=True)
+    # --- Annualized return based only on realized balance up to the last closed deal ---
+    initial_balance = equity[0][1]  # starting account value (e.g., 1000 USD)
 
-def plot_equity(equity,deals,symbol,start,end):
-    ts=[datetime.fromtimestamp(t) for t,_ in equity]
-    val=[v for _,v in equity]
-    lu=dict(equity)
-    plt.figure(figsize=(10,4))
-    plt.plot(ts,val)
-    for _,e,_,_ in deals:
-        y=lu.get(e)
-        if y: plt.scatter(datetime.fromtimestamp(e),y,marker='v',color='red')
-    plt.title(f'Equity {symbol}'); plt.ylabel('USD'); plt.grid(True); plt.tight_layout()
-    fname=f'equity_{symbol}_{start}_{end}.png'.replace(':','-')
-    p=os.path.join(RESULTS_DIR,fname); plt.savefig(p,dpi=120); plt.close(); return p
+    if deals:
+        first_open = deals[0][0]          # timestamp of the first deal open
+        last_close = deals[-1][1]         # timestamp of the last deal close
 
-def main():
-    pa=argparse.ArgumentParser(description='Single back‑test')
-    pa.add_argument('symbol'); pa.add_argument('start'); pa.add_argument('end')
-    pa.add_argument('--spacing-pct',type=float,default=1)
-    pa.add_argument('--tp',type=float,default=0.6)
-    pa.add_argument('--trailing',action='store_true',default=True)
-    pa.add_argument('--trailing-pct',type=float,default=0.1)
-    pa.add_argument('--plot',action='store_true')
-    pa.add_argument('-v','--verbose',action='store_true')
-    args=pa.parse_args()
-    logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
-                        format='%(asctime)s %(message)s',datefmt='%H:%M:%S')
-    df=load_binance(args.symbol,args.start,args.end,'1m')
-    strat=DCATrailingStrategy(spacing_pct=args.spacing_pct,tp_pct=args.tp,
-                              trailing=args.trailing,trailing_pct=args.trailing_pct)
-    deals,eq=strat.backtest(df)
-    print(json.dumps(calc_metrics(deals,eq),indent=2))
-    if args.plot:
-        plot_equity(eq,deals,args.symbol,args.start,args.end)
+        # Find the equity value at (or just before) the last deal close
+        bal_end = next(val for t, val in reversed(equity) if t <= last_close)
 
-if __name__=='__main__':
-    main()
+        years = (last_close - first_open) / (365 * 24 * 3600)
+    else:
+        # Fallback when no deals are present
+        bal_end = equity[-1][1]
+        years = (equity[-1][0] - equity[0][0]) / (365 * 24 * 3600)
+
+    roi_pct = (bal_end - initial_balance) / initial_balance * 100
+    annual_pct = ((1 + roi_pct / 100) ** (1 / years) - 1) * 100 if years > 0 else 0
+    annual_usd = initial_balance * annual_pct / 100
+
+    # Other metrics calculations (unchanged)
+    num_deals = len(deals)
+    wins = [d[2] for d in deals if d[2] > 0]
+    losses = [d[2] for d in deals if d[2] <= 0]
+    win_rate = len(wins) / num_deals * 100 if num_deals > 0 else 0
+    avg_win = np.mean(wins) if wins else 0
+    avg_loss = np.mean(losses) if losses else 0
+    max_drawdown = 0  # placeholder for max drawdown calculation
+
+    return {
+        "total_pl": total_pl,
+        "roi_pct": roi_pct,
+        "annual_pct": annual_pct,
+        "annual_usd": annual_usd,
+        "num_deals": num_deals,
+        "win_rate": win_rate,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "max_drawdown": max_drawdown,
+    }
