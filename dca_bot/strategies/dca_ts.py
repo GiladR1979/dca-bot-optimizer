@@ -1,3 +1,4 @@
+import pandas as pd
 
 class DCATrailingStrategy:
     """Price‑spacing DCA with optional trailing stop."""
@@ -14,6 +15,14 @@ class DCATrailingStrategy:
         self.order_usd=initial_balance/51
 
     def backtest(self, df, cooldown_sec=60):
+        # --- Bollinger-%B “crossing-up 0” entry signal ----------------
+        ma  = df["close"].rolling(20).mean()
+        sd  = df["close"].rolling(20).std()
+        lo  = ma - 2 * sd
+        hi  = ma + 2 * sd
+        bbp = (df["close"] - lo) / (hi - lo)
+        df  = df.copy()                       # keep original intact
+        df["entry_sig"] = (bbp.shift(1) < 0) & (bbp >= 0)
         cash=self.initial_balance
         qty=0.0
         total_profit=0.0
@@ -33,14 +42,22 @@ class DCATrailingStrategy:
             epoch=int(ts.timestamp())
             equity.append((epoch,cash+qty*price))
 
-            if state=='idle':
-                usd=self.order_usd; fee=usd*self.fee_rate
-                qty_buy=usd/price
-                cash-=usd+fee; qty+=qty_buy; cost=usd+fee
-                avg_price=price; dca_count=0
-                next_buy=price*(1-self.spacing_pct/100)
-                deal_entry=epoch; last_dca_ts=epoch; trailing_high=0.0
-                state='active'; continue
+            # ------------------------------------------------- OPEN
+            if state == "idle" and row.entry_sig:  # ← only fire on signal
+                usd = self.order_usd
+                fee = usd * self.fee_rate
+                qty_buy = usd / price
+                cash -= usd + fee
+                qty += qty_buy
+                cost = usd + fee
+                avg_price = price
+                dca_count = 0
+                next_buy = price * (1 - self.spacing_pct / 100)
+                deal_entry = epoch
+                last_dca_ts = epoch
+                trailing_high = 0.0
+                state = "active"
+                continue
 
             if (state=='active' and dca_count<self.max_dca and
                 price<=next_buy and epoch-last_dca_ts>=cooldown_sec):

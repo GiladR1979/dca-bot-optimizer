@@ -35,9 +35,21 @@ class DCAJITStrategy:
         close = df["close"].to_numpy(np.float64)
         ts = df.index.view("int64") // 1_000_000_000  # epoch seconds
 
+        # ------------- Bollinger-%B crossing-up 0 signal --------------
+        s_close = pd.Series(close)
+        ma = s_close.rolling(20).mean().to_numpy(np.float64)
+        sd = s_close.rolling(20).std().to_numpy(np.float64)
+        lo = ma - 2.0 * sd
+        hi = ma + 2.0 * sd
+        with np.errstate(divide="ignore", invalid="ignore"):  # Ignore errors in the first candles
+            bbp = (close - lo) / (hi - lo)
+        sig = ((np.roll(bbp, 1) < 0) & (bbp >= 0)).astype(np.uint8)
+        sig[0] = 0  # first candle can’t cross
+
         deals_rows, equity_rows = _run_loop_nb(
             ts,
             close,
+            sig,
             self.spacing_pct,
             self.tp_pct,
             self.trailing,
@@ -60,15 +72,16 @@ class DCAJITStrategy:
 
 @nb.njit(cache=True)
 def _run_loop_nb(
-    ts: np.ndarray,
-    px: np.ndarray,
-    spacing_pct: float,
-    tp_pct: float,
-    trailing: bool,
-    trailing_pct: float,
-    max_safety: int,
-    usd_per_order: float,
-    fee_rate: float,
+        ts: np.ndarray,
+        px: np.ndarray,
+        sig,
+        spacing_pct: float,
+        tp_pct: float,
+        trailing: bool,
+        trailing_pct: float,
+        max_safety: int,
+        usd_per_order: float,
+        fee_rate: float,
 ):
     """Core loop – fully JIT‑compiled by Numba."""
 
@@ -95,7 +108,7 @@ def _run_loop_nb(
         p = px[i]
 
         # --------------- open first order ------------------------------
-        if not in_trade:
+        if not in_trade and sig[i]:
             fee = usd_per_order * fee_rate
             buy_qty = usd_per_order / p
             qty = buy_qty
