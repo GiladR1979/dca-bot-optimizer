@@ -60,8 +60,8 @@ def calc_metrics(deals: List[DealRow],
 
     start, end = equity[0][0], equity[-1][0]
     years = (end - start) / (365 * 24 * 3600)
-    annual_pct = _annualised_pct(roi_pct, years)
-    annual_usd = 1000 * annual_pct / 100
+    annual_pct = roi_pct / years if years > 0 else 0  # linear, no reinvest
+    annual_usd = 1000 * annual_pct / 100  # on the same $1 000 base
 
     # ---------------- drawdowns -------------------------------------
     peak = equity[0][1]
