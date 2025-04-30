@@ -13,7 +13,7 @@ from typing import Dict, Tuple
 
 from ..loader import load_binance
 from ..optuna_search import run_three_studies
-from ..strategies.dca_ts import DCATrailingStrategy
+from ..strategies.dca_ts_numba import DCAJITStrategy as DCATrailingStrategy
 from ..simulator import calc_metrics
 from ..plotting import equity_curve, panel
 
