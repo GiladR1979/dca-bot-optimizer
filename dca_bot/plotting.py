@@ -1,24 +1,24 @@
 """
-Plot helpers – fast & size-capped (≤ 3000 px width).
+Plot helpers – capped at 3000 px width and **fixed 4000 px height**
+for both single‑panel and triple‑panel outputs.
 
-Changes versus the original:
-• dpi is fixed at 100  → width_px = dpi * width_inch ≤ 3000.
-• Equity arrays are down-sampled so we never plot >3000 points.
+(Uses headless Agg backend; down‑samples to at most 3000 points so
+files render in <2 s even on large data sets.)
 """
 
 from datetime import datetime
 import math
 from typing import List, Tuple
-
 import matplotlib
-matplotlib.use("Agg")                # headless, slightly faster
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-# ------------------------------------------------------------------ #
-MAX_PX    = 3000                     # hard pixel-width cap
-DPI       = 100                      # 100 dpi  ⇒  width_inch = 30
-MAX_PTS   = MAX_PX                   # no more points than horizontal pixels
+# ----------------------------------------------------------------- #
+MAX_W_PX = 3000  # horizontal cap
+H_PX = 1688  # **requested fixed height**
+DPI = 100
+MAX_PTS = MAX_W_PX
 
 
 # ------------------------------------------------------------------ #
@@ -32,20 +32,20 @@ def _downsample(ts: List, val: List) -> Tuple[List, List]:
 
 
 # ------------------------------------------------------------------ #
+def _fig_size():
+    """Return (width_inch, height_inch) for the fixed pixel caps."""
+    return MAX_W_PX / DPI, H_PX / DPI
+
+
+# ------------------------------------------------------------------ #
 def equity_curve(equity, deals, title, path):
-    """
-    Save a single-panel equity curve PNG with ▼ sell markers,
-    limited to ~3000 px wide and at most 3000 data points.
-    """
     ts = [datetime.fromtimestamp(t) for t, _ in equity]
     val = [v for _, v in equity]
-    ts, val = _downsample(ts, val)         # ↓ speed-boost
+    ts, val = _downsample(ts, val)
 
     lookup = dict(equity)
 
-    # figure inches so width_px = 3000
-    fig_w = MAX_PX / DPI
-    fig = plt.figure(figsize=(fig_w, 4), dpi=DPI)
+    fig = plt.figure(figsize=_fig_size(), dpi=DPI)
     ax = fig.add_subplot(1, 1, 1)
     ax.plot(ts, val, linewidth=0.8)
 
@@ -65,16 +65,9 @@ def equity_curve(equity, deals, title, path):
 
 # ------------------------------------------------------------------ #
 def panel(items: List[Tuple], path: str):
-    """
-    Draw N stacked equity panels, each capped at 3000 px width
-    and down-sampled to ≤3000 points.
-    """
     n = len(items)
-    fig_w = MAX_PX / DPI
-    fig_h = 4 * n
-    fig, axes = plt.subplots(
-        n, 1, figsize=(fig_w, fig_h), sharex=True, dpi=DPI
-    )
+    fig_w, fig_h = _fig_size()
+    fig, axes = plt.subplots(n, 1, figsize=(fig_w, fig_h), sharex=True, dpi=DPI)
 
     if n == 1:
         axes = [axes]
