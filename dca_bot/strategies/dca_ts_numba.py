@@ -45,13 +45,25 @@ def _build_entry_signal(df: pd.DataFrame) -> np.ndarray:
 # =========================  Strategy class  ========================= #
 @dataclass
 class DCAJITStrategy:
+    # ----- user-tunable parameters ------------------------------------
     spacing_pct: float = 1.0
     tp_pct: float = 0.6
     trailing: bool = True
     trailing_pct: float = 0.1
     max_safety: int = 50
-    usd_per_order: float = 1000 / 51.0
     fee_rate: float = 0.001  # taker fee 0.1 %
+    initial_balance: float = 1000.0  # NEW – same as Python version
+    usd_per_order: float | None = None  # will be set in __post_init__
+
+    # ------------------------------------------------------------------
+    def __post_init__(self):
+        """
+        Called automatically after the dataclass is created.
+        If the user didn’t specify usd_per_order, use the classic
+        ‘balance / 51’ formula so base + 50 safety orders fit.
+        """
+        if self.usd_per_order is None:
+            self.usd_per_order = self.initial_balance / 51.0
 
     # ------------------------------------------------------------------
     def backtest(
@@ -72,6 +84,7 @@ class DCAJITStrategy:
             self.max_safety,
             self.usd_per_order,
             self.fee_rate,
+            self.initial_balance,
         )
 
         # convert typed lists back to Python lists
@@ -93,6 +106,7 @@ def _run_loop_nb(
     max_safety: int,
     usd_per_order: float,
     fee_rate: float,
+    init_bal: float
 ):
     n = len(px)
     deals = NbList.empty_list(nb.float64[:])
@@ -102,7 +116,7 @@ def _run_loop_nb(
     entry_ts = 0
     qty = avg = next_buy = tp_price = trail_top = 0.0
     safety_cnt = 0
-    cash = 0.0
+    cash = init_bal
     cost = 0.0
 
     for i in range(n):
