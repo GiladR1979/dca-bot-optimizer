@@ -63,22 +63,31 @@ def calc_metrics(deals: List[DealRow],
     annual_pct = roi_pct / years if years > 0 else 0  # linear, no reinvest
     annual_usd = 1000 * annual_pct / 100  # on the same $1 000 base
 
-    # ---------------- drawdowns -------------------------------------
-    peak = equity[0][1]
-    peak_time = start
-    max_dd = longest = 0
+    # ---------------- drawdown vs. initial balance ---------------------
+    initial_bal = 1000.0  # same base you use for ROI
+
+    min_val = min(v for _, v in equity)
+    max_dd = max(0.0, initial_bal - min_val)  # absolute USD loss
+    max_dd_pct = max_dd / initial_bal * 100
+
+    # longest time the equity stayed below the initial balance
+    below = False
+    start_dd = 0
+    longest = 0
     for t, val in equity:
-        if val > peak:
-            peak = val
-            peak_time = t
-        dd = peak - val
-        if dd > max_dd:
-            max_dd = dd
-        if val < peak:
-            dur = t - peak_time
-            if dur > longest:
-                longest = dur
-    max_dd_pct  = max_dd / peak * 100 if peak else 0
+        if val < initial_bal:
+            if not below:
+                below = True
+                start_dd = t
+        else:
+            if below:
+                below = False
+                longest = max(longest, t - start_dd)
+
+    # if the bot finishes still under water
+    if below:
+        longest = max(longest, equity[-1][0] - start_dd)
+
     longest_min = longest / 60
 
     # ---------------- average deal duration -------------------------
