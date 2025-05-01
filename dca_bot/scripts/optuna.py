@@ -35,14 +35,16 @@ def run_set(
     base: str,
     use_sig: int,
     reopen_sec: int,
+    fast_ema: int | None,
+    slow_ema: int | None,
 ) -> Tuple[Dict, str, Tuple]:
     """Back-test one parameter set and return (metrics, PNG path, panel item)."""
     bot = DCATrailingStrategy(
         **params,
         use_sig=use_sig,
         reopen_sec=reopen_sec,
-        fast_ema=args.fast_ema,
-        slow_ema=args.slow_ema,
+        fast_ema=fast_ema,
+        slow_ema=slow_ema,
     )
     deals, eq = bot.backtest(df)
     met = calc_metrics(deals, eq)
@@ -139,16 +141,24 @@ def main() -> None:
     )
 
     def_m, def_png, item_def = run_set(
-        default_p, df, "default", args.symbol, args.use_sig, args.reopen_sec
+        default_p, df, "default", args.symbol,
+        args.use_sig, args.reopen_sec,
+        args.fast_ema, args.slow_ema,
     )
     best_m, best_png, item_best = run_set(
-        best_p, df, "best", args.symbol, args.use_sig, args.reopen_sec
+        best_p, df, "best", args.symbol,
+        args.use_sig, args.reopen_sec,
+        args.fast_ema, args.slow_ema,
     )
     safe_m, safe_png, item_safe = run_set(
-        safe_p, df, "safe", args.symbol, args.use_sig, args.reopen_sec
+        safe_p, df, "safe", args.symbol,
+        args.use_sig, args.reopen_sec,
+        args.fast_ema, args.slow_ema,
     )
     fast_m, fast_png, item_fast = run_set(
-        fast_p, df, "fast", args.symbol, args.use_sig, args.reopen_sec
+        fast_p, df, "fast", args.symbol,
+        args.use_sig, args.reopen_sec,
+        args.fast_ema, args.slow_ema,
     )
 
     # ------------------------------------------------ triple comparison panel
