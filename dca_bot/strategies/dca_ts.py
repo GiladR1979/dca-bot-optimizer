@@ -63,7 +63,8 @@ class DCATrailingStrategy:
         if self.fast_ema and self.slow_ema:
             ema_fast = close_3m.ewm(span=self.fast_ema, adjust=False).mean()
             ema_slow = close_3m.ewm(span=self.slow_ema, adjust=False).mean()
-            df["uptrend"] = (ema_fast > ema_slow).reindex(df.index, method="ffill")
+            up = (ema_fast > ema_slow).reindex(df.index, method="ffill").fillna(False)
+            df["uptrend"] = up.astype(bool)
         else:
             df["uptrend"] = True
 
@@ -98,6 +99,9 @@ class DCATrailingStrategy:
                 else (epoch >= last_close + self.reopen_sec)
             )
             want_open = row.uptrend and base_open
+            # >>> TEST: raise if we’re about to open while trend is DOWN
+            if state == "idle" and base_open and not row.uptrend:
+                raise RuntimeError(f"Trend filter failed at {ts} price={price}")
 
             if state == "idle" and want_open:
                 usd = self.order_usd

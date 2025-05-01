@@ -43,7 +43,12 @@ def _build_entry_signal(df: pd.DataFrame, fast_ema: Optional[int], slow_ema: Opt
     if fast_ema and slow_ema:
         ema_fast = close_3m.ewm(span=fast_ema, adjust=False).mean()
         ema_slow = close_3m.ewm(span=slow_ema, adjust=False).mean()
-        uptrend = (ema_fast > ema_slow).reindex(df.index, method="ffill").to_numpy(np.bool_)
+        uptrend = (
+            (ema_fast > ema_slow)
+            .reindex(df.index, method="ffill")
+            .fillna(False)                # NaN ⇒ False, blocks wrong entries
+            .to_numpy(np.bool_)
+        )
         sig = sig & uptrend
 
     return sig
