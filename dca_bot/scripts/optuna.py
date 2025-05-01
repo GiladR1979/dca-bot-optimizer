@@ -1,9 +1,15 @@
 """
-CLI – runs BEST, SAFE and FAST Optuna studies in one shot.
+CLI – runs BEST, SAFE and FAST Optuna studies in one shot, then
+re-tests the winning parameter sets.
 
-Updated so the call to `run_three_studies()` passes the *symbol* argument,
-matching the new signature in `optuna_search.py`.
+New flags
+---------
+--use-sig    1 (default) = wait for Bollinger+RSI trigger
+             0           = ignore trigger
+
+--reopen-sec N   Seconds to wait after a deal closes when --use-sig is 0
 """
+
 import argparse
 import json
 import logging
@@ -13,7 +19,7 @@ from typing import Dict, Tuple
 
 from ..loader import load_binance
 from ..optuna_search import run_three_studies
-from ..strategies.dca_ts import DCATrailingStrategy
+from ..strategies.dca_ts_numba import DCAJITStrategy as DCATrailingStrategy
 from ..simulator import calc_metrics
 from ..plotting import equity_curve, panel
 
@@ -21,11 +27,18 @@ from ..plotting import equity_curve, panel
 RES = os.path.join(os.path.dirname(__file__), "..", "..", "results")
 os.makedirs(RES, exist_ok=True)
 
-
 # -------------------------------------------------------------------- helpers
-def run_set(params: Dict, df, label: str, base: str) -> Tuple[Dict, str, Tuple]:
-    """Back‑test one parameter set and return (metrics, PNG path, panel item)."""
-    deals, eq = DCATrailingStrategy(**params).backtest(df)
+def run_set(
+    params: Dict,
+    df,
+    label: str,
+    base: str,
+    use_sig: int,
+    reopen_sec: int,
+) -> Tuple[Dict, str, Tuple]:
+    """Back-test one parameter set and return (metrics, PNG path, panel item)."""
+    bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec)
+    deals, eq = bot.backtest(df)
     met = calc_metrics(deals, eq)
 
     png = os.path.join(RES, f"{base}_{label}.png")
@@ -33,19 +46,28 @@ def run_set(params: Dict, df, label: str, base: str) -> Tuple[Dict, str, Tuple]:
 
     return met, png, (eq, deals, label)
 
-
 # -------------------------------------------------------------------- main CLI
 def main() -> None:
-    pa = argparse.ArgumentParser(description="Three‑objective optimiser")
+    pa = argparse.ArgumentParser(description="Three-objective optimiser")
     pa.add_argument("symbol")
     pa.add_argument("start")
     pa.add_argument("end")
+
     pa.add_argument("--trials", type=int, default=200,
                     help="number of trials for *each* study")
     pa.add_argument("--jobs", type=int, default=0,
                     help="0 = all CPU cores")
     pa.add_argument("--storage", default="sqlite:///dca.sqlite",
-                    help="'none' for in‑memory Optuna studies")
+                    help="'none' for in-memory Optuna studies")
+
+    # NEW flags -------------------------------------------------------
+    pa.add_argument("--use-sig", type=int, choices=[0, 1], default=1,
+                    help="1 = use Bollinger/RSI trigger (default); "
+                         "0 = ignore trigger")
+    pa.add_argument("--reopen-sec", type=int, default=60,
+                    help="Delay before reopening when --use-sig 0 "
+                         "(default 60 s)")
+
     pa.add_argument("-v", "--verbose", action="store_true")
     args = pa.parse_args()
 
@@ -69,15 +91,17 @@ def main() -> None:
         n_trials_each=args.trials,
         n_jobs=(os.cpu_count() if args.jobs == 0 else args.jobs),
         storage=args.storage,
+        use_sig=args.use_sig,
+        reopen_sec=args.reopen_sec,
     )
 
     def _pick(study):
         t = study.best_trial
         return t.user_attrs["params"], t.user_attrs["metrics"]
 
-    best_p, best_m = _pick(best_st)
-    safe_p, safe_m = _pick(safe_st)
-    fast_p, fast_m = _pick(fast_st)
+    best_p, _ = _pick(best_st)
+    safe_p, _ = _pick(safe_st)
+    fast_p, _ = _pick(fast_st)
 
     # ------------------------------------------------ baseline default
     default_p = dict(
@@ -87,10 +111,18 @@ def main() -> None:
         trailing_pct=0.1,
     )
 
-    def_m, def_png, item_def = run_set(default_p, df, "default", args.symbol)
-    best_m, best_png, item_best = run_set(best_p, df, "best", args.symbol)
-    safe_m, safe_png, item_safe = run_set(safe_p, df, "safe", args.symbol)
-    fast_m, fast_png, item_fast = run_set(fast_p, df, "fast", args.symbol)
+    def_m, def_png, item_def = run_set(
+        default_p, df, "default", args.symbol, args.use_sig, args.reopen_sec
+    )
+    best_m, best_png, item_best = run_set(
+        best_p, df, "best", args.symbol, args.use_sig, args.reopen_sec
+    )
+    safe_m, safe_png, item_safe = run_set(
+        safe_p, df, "safe", args.symbol, args.use_sig, args.reopen_sec
+    )
+    fast_m, fast_png, item_fast = run_set(
+        fast_p, df, "fast", args.symbol, args.use_sig, args.reopen_sec
+    )
 
     # ------------------------------------------------ triple comparison panel
     tri_png = os.path.join(RES, f"{args.symbol}_triple.png")
@@ -99,14 +131,15 @@ def main() -> None:
     # ------------------------------------------------ summary file
     summary = {
         "default": {"params": default_p, "metrics": def_m, "png": def_png},
-        "best": {"params": best_p, "metrics": best_m, "png": best_png},
-        "safe": {"params": safe_p, "metrics": safe_m, "png": safe_png},
-        "fast": {"params": fast_p, "metrics": fast_m, "png": fast_png},
+        "best":    {"params": best_p,    "metrics": best_m, "png": best_png},
+        "safe":    {"params": safe_p,    "metrics": safe_m, "png": safe_png},
+        "fast":    {"params": fast_p,    "metrics": fast_m, "png": fast_png},
         "panel": tri_png,
     }
 
     print(json.dumps(summary, indent=2))
-    with open(os.path.join(RES, f"{args.symbol}_opt_summary.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(RES, f"{args.symbol}_opt_summary.json"),
+              "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
 
