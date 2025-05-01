@@ -79,6 +79,11 @@ def main() -> None:
                     help="Slow EMA length for trend filter (optional)")
 
     pa.add_argument("-v", "--verbose", action="store_true")
+    pa.add_argument("--spacing-pct", type=float, default=None)
+
+    pa.add_argument("--tp-pct",      type=float, default=None)
+    pa.add_argument("--trailing",    action="store_true")
+    pa.add_argument("--trailing-pct",type=float, default=None)
     args = pa.parse_args()
 
     # ---------------- EMA sanity checks -----------------
@@ -111,6 +116,10 @@ def main() -> None:
         reopen_sec=args.reopen_sec,
         fast_ema=args.fast_ema,
         slow_ema=args.slow_ema,
+        spacing_fix=args.spacing_pct,
+        tp_fix=args.tp_pct,
+        trailing_fix=args.trailing,
+        trailpct_fix=args.trailing_pct,
     )
 
     def _pick(study):

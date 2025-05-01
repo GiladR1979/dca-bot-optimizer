@@ -18,13 +18,18 @@ import pandas as pd
 # ------------------------------------------------------------------ #
 _seen_params: set[tuple] = set()
 
-def _param_sig(spacing: float, tp: float, trailing: bool, trail_pct: float) -> tuple:
+def _param_sig(
+    spacing: float, tp: float, trailing: bool, trail_pct: float,
+    fast: int, slow: int
+) -> tuple:
     """Rounded signature so small FP noise does not count as new."""
     return (
         round(spacing, 3),
         round(tp, 3),
         bool(trailing),
         round(trail_pct, 3),
+        fast,
+        slow,
     )
 import sqlalchemy
 import sqlalchemy.pool
@@ -67,13 +72,17 @@ def _evaluate(
 # ------------------------------------------------------------------ #
 
 def make_objective(
-    df_full: pd.DataFrame,
-    metric_key: str,
-    *,
-    use_sig: int,
-    reopen_sec: int,
-    fast_ema: Optional[int],
-    slow_ema: Optional[int],
+        df_full: pd.DataFrame,
+        metric_key: str,
+        *,
+        use_sig: int,
+        reopen_sec: int,
+        fast_ema: Optional[int],
+        slow_ema: Optional[int],
+        spacing_fix: Optional[float],
+        tp_fix: Optional[float],
+        trailing_fix: Optional[bool],
+        trailpct_fix: Optional[float],
 ):
     """Return an Optuna objective that optimises a single metric."""
 
@@ -83,13 +92,21 @@ def make_objective(
 
     # ------------------------------------------------------------------ #
     def _objective(trial: optuna.Trial):
-        spacing = trial.suggest_float("spacing_pct", 0.3, 2.0, step=0.1)
-        tp = trial.suggest_float("tp_pct", 0.5, 3.0, step=0.1)
-        trailing = trial.suggest_categorical("trailing", [True, False])
-        trail_pct = trial.suggest_float("trailing_pct", 0.1, 0.1, step=0.1)
+        fe = fast_ema
+        se = slow_ema
+
+        #  ➜  if EMAs not given on CLI, let Optuna suggest them
+        # ---------------------------------------------------------------
+        if fe is None and se is None:
+            fe = trial.suggest_int("fast_ema", 5, 30)       # 3-min bars
+            se = trial.suggest_int("slow_ema", fe + 2, 120) # must be > fast
+        spacing   = spacing_fix   if spacing_fix   is not None else trial.suggest_float("spacing_pct", 0.3, 2.0, step=0.1)
+        tp        = tp_fix        if tp_fix        is not None else trial.suggest_float("tp_pct", 0.5, 3.0, step=0.1)
+        trailing  = trailing_fix  if trailing_fix  is not None else trial.suggest_categorical("trailing", [True, False])
+        trail_pct = trailpct_fix  if trailpct_fix  is not None else trial.suggest_float("trailing_pct", 0.1, 0.1, step=0.1)
 
         # ---- skip exact‑duplicate parameter sets --------------------
-        sig = _param_sig(spacing, tp, trailing, trail_pct)
+        sig = _param_sig(spacing, tp, trailing, trail_pct, fe, se)
         if sig in _seen_params:
             raise optuna.TrialPruned()
         _seen_params.add(sig)
@@ -102,7 +119,7 @@ def make_objective(
         m_head = _evaluate(
             head, spacing, tp, trailing, trail_pct,
             use_sig=use_sig, reopen_sec=reopen_sec,
-            fast_ema=fast_ema, slow_ema=slow_ema,
+            fast_ema=fe, slow_ema=se,
         )
         trial.report(m_head[metric_key], step=0)
         if trial.should_prune():
@@ -112,7 +129,7 @@ def make_objective(
         m_full = _evaluate(
             df_full, spacing, tp, trailing, trail_pct,
             use_sig=use_sig, reopen_sec=reopen_sec,
-            fast_ema=fast_ema, slow_ema=slow_ema,
+            fast_ema=fe, slow_ema=se,
         )
         trial.set_user_attr("metrics", m_full)
         trial.set_user_attr(
@@ -142,6 +159,8 @@ def _register_trials(study: optuna.study.Study):
             t.params.get("tp_pct"),
             t.params.get("trailing"),
             t.params.get("trailing_pct"),
+            t.params.get("fast_ema", 0),
+            t.params.get("slow_ema", 0),
         )
         _seen_params.add(sig)
 
@@ -201,8 +220,12 @@ def seed_from(source: optuna.study.Study, dest: optuna.study.Study, metric_key: 
         if val is None or (isinstance(val, float) and math.isnan(val)):
             continue
 
+        # keep only parameters that exist in the original search‑space
+        dist_keys = set(source.best_trial.distributions.keys())
+        clean_params = {k: v for k, v in t.user_attrs["params"].items() if k in dist_keys}
+
         cloned = optuna.trial.create_trial(
-            params=t.user_attrs["params"],
+            params=clean_params,
             distributions=source.best_trial.distributions,
             value=val,
             user_attrs=t.user_attrs,
@@ -212,10 +235,12 @@ def seed_from(source: optuna.study.Study, dest: optuna.study.Study, metric_key: 
 
         # register the cloned parameters so later samplers won't repeat them
         sig = _param_sig(
-            cloned.params["spacing_pct"],
-            cloned.params["tp_pct"],
-            cloned.params["trailing"],
-            cloned.params["trailing_pct"],
+            cloned.params.get("spacing_pct", 0),
+            cloned.params.get("tp_pct", 0),
+            cloned.params.get("trailing", False),
+            cloned.params.get("trailing_pct", 0),
+            cloned.params.get("fast_ema", 0),
+            cloned.params.get("slow_ema", 0),
         )
         _seen_params.add(sig)
 
@@ -225,15 +250,19 @@ def seed_from(source: optuna.study.Study, dest: optuna.study.Study, metric_key: 
 # ------------------------------------------------------------------ #
 
 def run_three_studies(
-    df: pd.DataFrame,
-    symbol: str,
-    n_trials_each: int,
-    n_jobs: int,
-    storage: Optional[str],
-    use_sig: int = 1,
-    reopen_sec: int = 60,
-    fast_ema: Optional[int] = None,
-    slow_ema: Optional[int] = None,
+        df: pd.DataFrame,
+        symbol: str,
+        n_trials_each: int,
+        n_jobs: int,
+        storage: Optional[str],
+        use_sig: int = 1,
+        reopen_sec: int = 60,
+        fast_ema: Optional[int] = None,
+        slow_ema: Optional[int] = None,
+        spacing_fix: Optional[float] = None,
+        tp_fix: Optional[float] = None,
+        trailing_fix: Optional[bool] = None,
+        trailpct_fix: Optional[float] = None,
 ):
     """Run BEST, SAFE and FAST Optuna studies for *symbol*."""
 
@@ -244,6 +273,10 @@ def run_three_studies(
             df, "annual_pct",
             use_sig=use_sig, reopen_sec=reopen_sec,
             fast_ema=fast_ema, slow_ema=slow_ema,
+            spacing_fix=spacing_fix,
+            tp_fix=tp_fix,
+            trailing_fix=trailing_fix,
+            trailpct_fix=trailpct_fix,
         ),
         n_trials=n_trials_each,
         n_jobs=n_jobs,
@@ -258,6 +291,10 @@ def run_three_studies(
             df, "max_drawdown_pct",
             use_sig=use_sig, reopen_sec=reopen_sec,
             fast_ema=fast_ema, slow_ema=slow_ema,
+            spacing_fix=spacing_fix,
+            tp_fix=tp_fix,
+            trailing_fix=trailing_fix,
+            trailpct_fix=trailpct_fix,
         ),
         n_trials=n_trials_each,
         n_jobs=n_jobs,
@@ -272,6 +309,10 @@ def run_three_studies(
             df, "deals",
             use_sig=use_sig, reopen_sec=reopen_sec,
             fast_ema=fast_ema, slow_ema=slow_ema,
+            spacing_fix=spacing_fix,
+            tp_fix=tp_fix,
+            trailing_fix=trailing_fix,
+            trailpct_fix=trailpct_fix,
         ),                    # optimise the “deals” metric
         n_trials=n_trials_each,
         n_jobs=n_jobs,
