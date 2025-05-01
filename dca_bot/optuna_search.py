@@ -45,6 +45,8 @@ def _evaluate(
     *,
     use_sig: int,
     reopen_sec: int,
+    fast_ema: Optional[int] = None,
+    slow_ema: Optional[int] = None,
 ) -> Dict[str, float]:
     bot = DCATrailingStrategy(
         spacing_pct=spacing,
@@ -53,6 +55,8 @@ def _evaluate(
         trailing_pct=trail_pct,
         use_sig=use_sig,
         reopen_sec=reopen_sec,
+        fast_ema=fast_ema,
+        slow_ema=slow_ema,
     )
     deals, eq = bot.backtest(df)
     return calc_metrics(deals, eq)
@@ -62,7 +66,15 @@ def _evaluate(
 #  objective factory                                                 #
 # ------------------------------------------------------------------ #
 
-def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reopen_sec: int):
+def make_objective(
+    df_full: pd.DataFrame,
+    metric_key: str,
+    *,
+    use_sig: int,
+    reopen_sec: int,
+    fast_ema: Optional[int],
+    slow_ema: Optional[int],
+):
     """Return an Optuna objective that optimises a single metric."""
 
     head = (
@@ -87,13 +99,21 @@ def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reop
             raise optuna.TrialPruned()
 
         # ---------- fast head‑run for early pruning --------------------
-        m_head = _evaluate(head, spacing, tp, trailing, trail_pct, use_sig=use_sig, reopen_sec=reopen_sec)
+        m_head = _evaluate(
+            head, spacing, tp, trailing, trail_pct,
+            use_sig=use_sig, reopen_sec=reopen_sec,
+            fast_ema=fast_ema, slow_ema=slow_ema,
+        )
         trial.report(m_head[metric_key], step=0)
         if trial.should_prune():
             raise optuna.TrialPruned()
 
         # ---------- full back‑test ------------------------------------
-        m_full = _evaluate(df_full, spacing, tp, trailing, trail_pct, use_sig=use_sig, reopen_sec=reopen_sec)
+        m_full = _evaluate(
+            df_full, spacing, tp, trailing, trail_pct,
+            use_sig=use_sig, reopen_sec=reopen_sec,
+            fast_ema=fast_ema, slow_ema=slow_ema,
+        )
         trial.set_user_attr("metrics", m_full)
         trial.set_user_attr(
             "params",
@@ -212,13 +232,19 @@ def run_three_studies(
     storage: Optional[str],
     use_sig: int = 1,
     reopen_sec: int = 60,
+    fast_ema: Optional[int] = None,
+    slow_ema: Optional[int] = None,
 ):
     """Run BEST, SAFE and FAST Optuna studies for *symbol*."""
 
     # ---------- BEST (annual %) --------------------------------------
     study_best = _new_study("dca_best", "maximize", storage, symbol)
     study_best.optimize(
-        make_objective(df, "annual_pct", use_sig=use_sig, reopen_sec=reopen_sec),
+        make_objective(
+            df, "annual_pct",
+            use_sig=use_sig, reopen_sec=reopen_sec,
+            fast_ema=fast_ema, slow_ema=slow_ema,
+        ),
         n_trials=n_trials_each,
         n_jobs=n_jobs,
         show_progress_bar=True,
@@ -228,7 +254,11 @@ def run_three_studies(
     study_safe = _new_study("dca_safe", "minimize", storage, symbol)
     seed_from(study_best, study_safe, "max_drawdown_pct")
     study_safe.optimize(
-        make_objective(df, "max_drawdown_pct", use_sig=use_sig, reopen_sec=reopen_sec),
+        make_objective(
+            df, "max_drawdown_pct",
+            use_sig=use_sig, reopen_sec=reopen_sec,
+            fast_ema=fast_ema, slow_ema=slow_ema,
+        ),
         n_trials=n_trials_each,
         n_jobs=n_jobs,
         show_progress_bar=True,
@@ -238,7 +268,11 @@ def run_three_studies(
     study_fast = _new_study("dca_fast", "maximize", storage, symbol)
     seed_from(study_best, study_fast, "deals")          # copy existing trials
     study_fast.optimize(
-        make_objective(df, "deals", use_sig=use_sig, reopen_sec=reopen_sec),                    # optimise the “deals” metric
+        make_objective(
+            df, "deals",
+            use_sig=use_sig, reopen_sec=reopen_sec,
+            fast_ema=fast_ema, slow_ema=slow_ema,
+        ),                    # optimise the “deals” metric
         n_trials=n_trials_each,
         n_jobs=n_jobs,
         show_progress_bar=True,

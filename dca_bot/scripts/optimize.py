@@ -13,8 +13,10 @@ RES = os.path.join(os.path.dirname(__file__), "..", "..", "results")
 os.makedirs(RES, exist_ok=True)
 
 
-def run_set(params, df, label, base):
-    deals, eq = DCATrailingStrategy(**params).backtest(df)
+def run_set(params, df, label, base, fast_ema=None, slow_ema=None):
+    deals, eq = DCATrailingStrategy(**params,
+                                    fast_ema=fast_ema,
+                                    slow_ema=slow_ema).backtest(df)
     met = calc_metrics(deals, eq)
     png = os.path.join(RES, f"{base}_{label}.png")
     equity_curve(eq, deals, label, png)
@@ -29,8 +31,18 @@ def main():
     pa.add_argument("--spacings", default="0.5,1,1.5,2")
     pa.add_argument("--tps", default="0.5,0.6,1")
     pa.add_argument("--trailing-pct", type=float, default=0.1)
+    pa.add_argument("--fast-ema", type=int, default=None,
+                    help="Fast EMA length for trend filter (optional)")
+    pa.add_argument("--slow-ema", type=int, default=None,
+                    help="Slow EMA length for trend filter (optional)")
     pa.add_argument("-v", "--verbose", action="store_true")
     args = pa.parse_args()
+
+    # -------- EMA sanity checks ----------
+    if (args.fast_ema is None) ^ (args.slow_ema is None):
+        pa.error("Both --fast-ema and --slow-ema must be given together")
+    if args.fast_ema and args.slow_ema and args.fast_ema >= args.slow_ema:
+        pa.error("--fast-ema must be smaller than --slow-ema")
 
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                         format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
@@ -43,7 +55,8 @@ def main():
                       "trailing_pct": 0.1}
 
     met_def, png_def, item_def = run_set(
-        default_params, df, "default", args.symbol)
+        default_params, df, "default", args.symbol,
+        args.fast_ema, args.slow_ema)
 
     # --- grid search -------------------------------------------------
     grid = {
@@ -59,11 +72,14 @@ def main():
     fast_params, fast_met = res["fast"]
 
     met_best, png_best, item_best = run_set(
-        best_params, df, "best", args.symbol)
+        best_params, df, "best", args.symbol,
+        args.fast_ema, args.slow_ema)
     met_safe, png_safe, item_safe = run_set(
-        safe_params, df, "safe", args.symbol)
+        safe_params, df, "safe", args.symbol,
+        args.fast_ema, args.slow_ema)
     met_fast, png_fast, item_fast = run_set(
-        fast_params, df, "fast", args.symbol)
+        fast_params, df, "fast", args.symbol,
+        args.fast_ema, args.slow_ema)
 
     # --- quad plot ---------------------------------------------------
     quad_png = os.path.join(RES, f"{args.symbol}_quad.png")

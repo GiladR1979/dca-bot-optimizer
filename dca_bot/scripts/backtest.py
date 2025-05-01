@@ -1,4 +1,5 @@
 import numpy as np
+import argparse
 
 def calc_metrics(deals, equity):
     total_pl = sum(d[2] for d in deals)
@@ -43,3 +44,20 @@ def calc_metrics(deals, equity):
         "avg_loss": avg_loss,
         "max_drawdown": max_drawdown,
     }
+
+parser = argparse.ArgumentParser(description="Run one DCA back‑test")
+parser.add_argument("--symbol", required=True, help="Trading pair, e.g. SOLUSDT")
+parser.add_argument("--csv", required=True, help="Path to 1‑minute OHLC CSV")
+parser.add_argument("--fast-ema", type=int, default=None,
+                    help="Fast EMA length for trend filter (optional)")
+parser.add_argument("--slow-ema", type=int, default=None,
+                    help="Slow EMA length for trend filter (optional)")
+# add any other existing parameters here …
+
+args = parser.parse_args()
+
+# -------- EMA sanity checks -----------
+if (args.fast_ema is None) ^ (args.slow_ema is None):
+    parser.error("Both --fast-ema and --slow-ema must be given together")
+if args.fast_ema and args.slow_ema and args.fast_ema >= args.slow_ema:
+    parser.error("--fast-ema must be smaller than --slow-ema")

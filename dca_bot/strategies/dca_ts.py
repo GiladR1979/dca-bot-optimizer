@@ -20,6 +20,8 @@ class DCATrailingStrategy:
         trailing: bool = True,
         trailing_pct: float = 0.1,
         max_dca: int = 50,
+        fast_ema: Optional[int] = None,
+        slow_ema: Optional[int] = None,
         fee_rate: float = 0.001,
         initial_balance: float = 1000.0,
         reopen_sec: Optional[int] = None,          # ← NEW in signature
@@ -33,10 +35,11 @@ class DCATrailingStrategy:
         self.initial_balance = initial_balance
         self.order_usd = initial_balance / 51      # 1 base + 50 safety slots
         self.reopen_sec = reopen_sec               # ← store it!
+        self.fast_ema = fast_ema
+        self.slow_ema = slow_ema
 
     # ------------------------------------------------------------------
-    @staticmethod
-    def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    def _add_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Add bbp3, rsi3 and entry_sig columns (3-minute maths)."""
         close_3m = df["close"].resample("3min").last().dropna()
 
@@ -55,6 +58,14 @@ class DCATrailingStrategy:
         df["entry_sig"] = (
             (df["bbp3"].shift(1) < 0) & (df["bbp3"] >= 0) & (df["rsi3"].shift(1) < 30)
         ).fillna(False)
+
+        # ------------ EMA trend filter -----------------
+        if self.fast_ema and self.slow_ema:
+            ema_fast = close_3m.ewm(span=self.fast_ema, adjust=False).mean()
+            ema_slow = close_3m.ewm(span=self.slow_ema, adjust=False).mean()
+            df["uptrend"] = (ema_fast > ema_slow).reindex(df.index, method="ffill")
+        else:
+            df["uptrend"] = True
 
         return df
 
@@ -81,12 +92,13 @@ class DCATrailingStrategy:
             epoch = int(ts.timestamp())
             equity.append((epoch, cash + qty * price))
 
-            # ---------- open first order --------------------------------
-            want_open = (
+            base_open = (
                 row.entry_sig
                 if self.reopen_sec is None
                 else (epoch >= last_close + self.reopen_sec)
             )
+            want_open = row.uptrend and base_open
+
             if state == "idle" and want_open:
                 usd = self.order_usd
                 fee = usd * self.fee_rate

@@ -37,7 +37,13 @@ def run_set(
     reopen_sec: int,
 ) -> Tuple[Dict, str, Tuple]:
     """Back-test one parameter set and return (metrics, PNG path, panel item)."""
-    bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec)
+    bot = DCATrailingStrategy(
+        **params,
+        use_sig=use_sig,
+        reopen_sec=reopen_sec,
+        fast_ema=args.fast_ema,
+        slow_ema=args.slow_ema,
+    )
     deals, eq = bot.backtest(df)
     met = calc_metrics(deals, eq)
 
@@ -67,9 +73,19 @@ def main() -> None:
     pa.add_argument("--reopen-sec", type=int, default=60,
                     help="Delay before reopening when --use-sig 0 "
                          "(default 60 s)")
+    pa.add_argument("--fast-ema", type=int, default=None,
+                    help="Fast EMA length for trend filter (optional)")
+    pa.add_argument("--slow-ema", type=int, default=None,
+                    help="Slow EMA length for trend filter (optional)")
 
     pa.add_argument("-v", "--verbose", action="store_true")
     args = pa.parse_args()
+
+    # ---------------- EMA sanity checks -----------------
+    if (args.fast_ema is None) ^ (args.slow_ema is None):
+        pa.error("Both --fast-ema and --slow-ema must be given together")
+    if args.fast_ema and args.slow_ema and args.fast_ema >= args.slow_ema:
+        pa.error("--fast-ema must be smaller than --slow-ema")
 
     if args.storage.lower() == "none":
         args.storage = None
@@ -93,6 +109,8 @@ def main() -> None:
         storage=args.storage,
         use_sig=args.use_sig,
         reopen_sec=args.reopen_sec,
+        fast_ema=args.fast_ema,
+        slow_ema=args.slow_ema,
     )
 
     def _pick(study):

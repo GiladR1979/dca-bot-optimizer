@@ -11,7 +11,7 @@ native 1-minute frame.  The heavy loop remains fully JIT-compiled.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import numba as nb
 import numpy as np
@@ -21,7 +21,7 @@ from numba.typed import List as NbList
 
 
 # =====================  Python-side helpers  ======================= #
-def _build_entry_signal(df: pd.DataFrame) -> np.ndarray:
+def _build_entry_signal(df: pd.DataFrame, fast_ema: Optional[int], slow_ema: Optional[int]) -> np.ndarray:
     """Return uint8 array (0/1) per 1-minute row for the smart trigger."""
     close_3m = df["close"].resample("3min").last().dropna()
 
@@ -38,6 +38,14 @@ def _build_entry_signal(df: pd.DataFrame) -> np.ndarray:
 
     sig = np.zeros(len(df), dtype=np.uint8)
     sig[1:] = (bbp1[:-1] < 0) & (bbp1[1:] >= 0) & (rsi1[:-1] < 30)
+
+    # --------- EMA trend filter (optional) ----------
+    if fast_ema and slow_ema:
+        ema_fast = close_3m.ewm(span=fast_ema, adjust=False).mean()
+        ema_slow = close_3m.ewm(span=slow_ema, adjust=False).mean()
+        uptrend = (ema_fast > ema_slow).reindex(df.index, method="ffill").to_numpy(np.bool_)
+        sig = sig & uptrend
+
     return sig
 
 
@@ -50,6 +58,8 @@ class DCAJITStrategy:
     trailing: bool = True
     trailing_pct: float = 0.1
     max_safety: int = 50
+    fast_ema: Optional[int] = None
+    slow_ema: Optional[int] = None
     fee_rate: float = 0.001
     initial_balance: float = 1000.0
     usd_per_order: float | None = None
@@ -70,7 +80,7 @@ class DCAJITStrategy:
 
         close = df["close"].to_numpy(np.float64)
         ts    = df.index.view("int64") // 1_000_000_000   # epoch seconds
-        sig   = _build_entry_signal(df)
+        sig   = _build_entry_signal(df, self.fast_ema, self.slow_ema)
 
         deals_rows, equity_rows = _run_loop_nb(
             ts, close, sig,
