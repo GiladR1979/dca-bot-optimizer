@@ -1,11 +1,12 @@
 """
 Pure-Python DCA strategy (trailing TP)
 • Entry = Bollinger %B(20, 2) crosses up 0  AND  RSI-7 < 30
-  both calculated on **3-minute candles**
-• Built for 1-minute OHLCV DataFrames (DatetimeIndex, UTC)
+  both on **3-minute candles**, f-filled to 1-min.
+• Optional `reopen_sec` lets you ignore the signal and reopen a deal
+  N seconds after the previous one closed.
 """
 
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import pandas as pd
 import ta
@@ -21,6 +22,7 @@ class DCATrailingStrategy:
         max_dca: int = 50,
         fee_rate: float = 0.001,
         initial_balance: float = 1000.0,
+        reopen_sec: Optional[int] = None,          # ← NEW in signature
     ):
         self.spacing_pct = spacing_pct
         self.tp_pct = tp_pct
@@ -29,28 +31,23 @@ class DCATrailingStrategy:
         self.max_dca = max_dca
         self.fee_rate = fee_rate
         self.initial_balance = initial_balance
-        self.order_usd = initial_balance / 51  # 1 base + 50 safety slots
+        self.order_usd = initial_balance / 51      # 1 base + 50 safety slots
+        self.reopen_sec = reopen_sec               # ← store it!
 
     # ------------------------------------------------------------------
     @staticmethod
     def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Add bbp3, rsi3 and entry_sig columns to a 1-minute frame,
-        based on 3-minute calculations.
-        """
+        """Add bbp3, rsi3 and entry_sig columns (3-minute maths)."""
         close_3m = df["close"].resample("3min").last().dropna()
 
-        # Bollinger %B(20, 2)
-        ma = close_3m.rolling(20, min_periods=20).mean()
-        sd = close_3m.rolling(20, min_periods=20).std()
-        lo = ma - 2 * sd
-        hi = ma + 2 * sd
+        ma  = close_3m.rolling(20, min_periods=20).mean()
+        sd  = close_3m.rolling(20, min_periods=20).std()
+        lo  = ma - 2 * sd
+        hi  = ma + 2 * sd
         bbp3 = (close_3m - lo) / (hi - lo)
 
-        # RSI-7
         rsi3 = ta.momentum.RSIIndicator(close_3m, window=7).rsi()
 
-        # align back to 1-minute index
         df = df.copy()
         df["bbp3"] = bbp3.reindex(df.index, method="ffill")
         df["rsi3"] = rsi3.reindex(df.index, method="ffill")
@@ -65,10 +62,7 @@ class DCATrailingStrategy:
     def backtest(
         self, df: pd.DataFrame, cooldown_sec: int = 60
     ) -> Tuple[List[Tuple], List[Tuple]]:
-        """
-        Run the strategy on a 1-minute OHLCV DataFrame.
-        Returns (deals, equity_curve).
-        """
+
         df = self._add_indicators(df)
 
         cash = self.initial_balance
@@ -81,13 +75,19 @@ class DCATrailingStrategy:
         dca_count = 0
         deal_entry = last_dca_ts = cost = 0
 
+        last_close = -1  # epoch of previous exit
         for ts, row in df.iterrows():
             price = row.close
             epoch = int(ts.timestamp())
             equity.append((epoch, cash + qty * price))
 
-            # ---------- open first order ---------------------------------
-            if state == "idle" and row.entry_sig:
+            # ---------- open first order --------------------------------
+            want_open = (
+                row.entry_sig
+                if self.reopen_sec is None
+                else (epoch >= last_close + self.reopen_sec)
+            )
+            if state == "idle" and want_open:
                 usd = self.order_usd
                 fee = usd * self.fee_rate
                 qty_buy = usd / price
@@ -104,7 +104,7 @@ class DCATrailingStrategy:
                 state = "active"
                 continue
 
-            # ---------- DCA safety buys ----------------------------------
+            # ---------- DCA safety buys ---------------------------------
             if (
                 state == "active"
                 and dca_count < self.max_dca
@@ -124,7 +124,7 @@ class DCATrailingStrategy:
                 avg_price = (avg_price * qty + price * qty_buy) / (qty + qty_buy)
                 next_buy = price * (1 - self.spacing_pct / 100)
 
-            # ---------- take-profit / trailing stop ----------------------
+            # ---------- take-profit / trailing stop ---------------------
             if state == "active" and price >= avg_price * (1 + self.tp_pct / 100):
                 exit_now = False
                 if self.trailing:
@@ -146,9 +146,12 @@ class DCATrailingStrategy:
                     cash = self.initial_balance + total_profit
                     qty = 0.0
                     state = "idle"
+                    last_close = epoch
 
         # final equity snapshot
         if equity and equity[-1][0] != int(df.index[-1].timestamp()):
-            equity.append((int(df.index[-1].timestamp()), cash + qty * df.iloc[-1].close))
+            equity.append(
+                (int(df.index[-1].timestamp()), cash + qty * df.iloc[-1].close)
+            )
 
         return deals, equity
