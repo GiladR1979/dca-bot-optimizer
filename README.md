@@ -1,100 +1,111 @@
+# DCA-Bot Optimizer
 
-# DCA‑Bot Optimizer 📈
-
-Back‑test and grid‑optimize a Dollar‑Cost‑Averaging (DCA) spot‑strategy
-for any Binance symbol.
-
-## Features
-
-* **Base + safety orders** – 1 base buy and up to 50 safety buys  
-* **Trailing take‑profit** (optional)  
-* **Grid search** over spacing %, TP %, *with / without* trailing  
-* Automatically **skips invalid combos**  
-  * if trailing is **off** → `tp_pct ≥ 0.5 %`  
-  * if trailing is **on** → `tp_pct − trailing_pct ≥ 0.5 %`  
-* Metrics: ROI %, annualised %, max draw‑down %, average deal time, …  
-* Equity PNGs with red ▼ markers at every sell  
-* Picks **best** (max annual %) and **safe** (min draw‑down %) configs  
-* Generates a 3‑panel comparison plot *(default | best | safe)*
+> **Back-test & parameter-search engine for 3Commas-style “Deal-Start / DCA / Trailing-TP” bots.**  
+> • Indicator-based *smart* entries (Bollinger %B + RSI) **or** fixed-delay *stupid* re-entries  
+> • Fast Numba core (--jobs 0 = all CPU cores)  
+> • Optuna triple search: **BEST** (profit), **SAFE** (drawdown), **FAST** (deal frequency)  
+> • PNG equity curves, JSON summaries, auto-panel comparison  
+> • Works on Windows / Linux / macOS, Python 3.8+
 
 ---
 
-## Quick start
+## 1  Features
+
+| Module | What it does |
+|--------|--------------|
+| `loader.py` | Downloads / caches Binance klines (1‑min) |
+| `strategies/` | `dca_ts.py` = pure‑Python back‑tester<br>`dca_ts_numba.py` = Numba‑JIT back‑tester (20–50× faster) |
+| `simulator.py` | ROI, APR, drawdown, trade metrics (handles open deals) |
+| `plotting.py` | Down‑sampled 3 000 × 4 000 px equity + panel PNGs |
+| `optuna_search.py` | Three Optuna studies with duplicate‑guard & DB storage |
+| `scripts/optuna.py` | CLI wrapper: runs search → four showcase back‑tests |
+| `run_coins.ps1` | Example PowerShell batch to optimise many symbols |
+
+### Entry modes
+
+* **Smart / signal** (default)  
+  *Bollinger %B (20, 2) crosses up 0 **and** previous 3‑min RSI‑7 < 30*
+* **Stupid / delay**  
+  `--use-sig 0 --reopen-sec N` → open a new deal **N seconds** after the last closed.
+
+---
+
+## 2  Installation
 
 ```bash
-git clone https://github.com/<your‑user>/<repo>.git
-cd <repo>
-
-python -m venv .venv && source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install pandas requests matplotlib
+git clone https://github.com/GiladR1979/dca-bot-optimizer.git
+cd dca-bot-optimizer
+python -m venv .venv && source .venv/bin/activate       # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-### Single back‑test
+> **Dependencies:** `numpy`, `pandas`, `numba`, `ta`, `matplotlib`, `optuna`, `requests`
+
+---
+
+## 3  Quick start
 
 ```bash
-python -m dca_bot.scripts.backtest  SYMBOL  START  END         --spacing-pct 1  --tp 0.6  --trailing        --plot  -v
+# optimise SOLUSDT on 1‑min candles, 2021‑01‑01 → 2025‑03‑01
+python -m dca_bot.scripts.optuna SOLUSDT 2021-01-01 2025-03-01 \
+       --trials 400  --jobs 0            \  # 400 trials, all CPU cores
+       --storage sqlite:///dca.sqlite    \  # resume across runs
+       --use-sig 1                       \  # indicator mode
+       -v                                   # verbose logs
 ```
 
-* `SYMBOL` – Binance pair (`BTCUSDT`, `1INCHUSDT`, …)  
-* `START / END` – `YYYY‑MM‑DD` (UTC)
+Outputs → `results/`
 
-### Grid optimizer
-
-```bash
-python -m dca_bot.scripts.optimize  SYMBOL  START  END  -v
+```
+SOLUSDT_best.png     SOLUSDT_safe.png     SOLUSDT_fast.png
+SOLUSDT_default.png  SOLUSDT_triple.png   SOLUSDT_opt_summary.json
 ```
 
-Optional knobs:
+---
+
+## 4  Command‑line flags
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--spacings` | `0.5,1,1.5,2` | list of spacing % values |
-| `--tps`      | `0.5,0.6,1`   | list of TP % values (≥ 0.5) |
-| `--trailing-pct` | `0.1` | trailing gap % |
+| `--trials` | `200` | trials **per** study |
+| `--jobs` | `0` | Optuna workers (0 = all cores) |
+| `--storage` | `sqlite:///dca.sqlite` | RDB url (`none` → in‑memory) |
+| `--use-sig` | `1` | `1` = use indicator, `0` = ignore |
+| `--reopen-sec` | `60` | delay when `--use-sig 0` |
+| `-v` | off | verbose logging |
 
-Outputs (`results/`):
+---
 
-```
-equity_<symbol>_default.png
-equity_<symbol>_best.png
-equity_<symbol>_safe.png
-<symbol>_triple.png      # 3‑panel figure
-<symbol>_summary.json    # params & metrics
+## 5  Batch run
+
+Edit `run_coins.ps1` and then:
+
+```powershell
+.
+un_coins.ps1
 ```
 
 ---
 
-## Algorithm
+## 6  Metrics
 
-1. **Base order**: \$1 000 / 51 ≈ \$19.61 at the first candle  
-2. **Safety orders**: each price drop of *spacing_pct* triggers a fixed‑size buy  
-3. **Take‑profit**  
-   * trailing **off** → sell at first TP touch  
-   * trailing **on** → arm stop at `highest*(1 − trailing_pct)`  
-4. Realised P/L rolled into the cash balance  
-5. Final open deal is ignored for metrics & plots
-
----
-
-## Repository layout
-
-```
-dca_bot/
-├─ loader.py           # Binance downloader (per‑batch logs)
-├─ strategies/
-│   └─ dca_ts.py       # DCA + trailing engine
-├─ simulator.py        # ROI, draw‑down, etc.
-├─ optimiser.py        # grid search + validity guard
-├─ plotting.py         # equity curves & 3‑panel figure
-└─ scripts/
-   ├─ backtest.py      # single run
-   └─ optimize.py      # grid optimizer CLI
-results/               # generated PNGs + JSON summary
-```
+| Key | Meaning |
+|-----|---------|
+| `total_pl` | realised profit on \$1 000 base |
+| `annual_pct` | **APR** (linear) = ROI / years |
+| `max_drawdown_pct` | worst % below \$1 000 |
+| `avg_deal_min` | average closed‑deal duration |
 
 ---
 
-## License
+## 7  Contributing
 
-MIT – free to use, fork, and modify.  
-Pull requests and bug reports are welcome!
+* Fork → feature branch → PR against **`dev`**  
+* Run `black` + `flake8` before push  
+* Include test or before/after screenshot
+
+---
+
+## 8  License
+
+MIT © 2025 Gilad R.
