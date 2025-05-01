@@ -9,6 +9,7 @@ New flags
 
 --reopen-sec N   Seconds to wait after a deal closes when --use-sig is 0
 """
+from __future__ import annotations
 
 import argparse
 import json
