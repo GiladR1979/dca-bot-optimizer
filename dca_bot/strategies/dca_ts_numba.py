@@ -23,13 +23,16 @@ from numba.typed import List as NbList
 # =====================  Python-side helpers  ======================= #
 def _build_entry_signal(df: pd.DataFrame) -> np.ndarray:
     """
-    Return uint8 array: 1 when close > EMA-20  (risk-on), else 0.
+    4-hour EMA-20 risk-on array (uint8).
     """
-    kel_mid  = df["close"].ewm(span=20, adjust=False).mean().to_numpy(np.float64)
-    close_px = df["close"].to_numpy(np.float64)
+    close_4h = df["close"].resample("4h").last().dropna()
+    kel_mid = close_4h.ewm(span=20, adjust=False).mean() \
+                        .reindex(df.index, method="ffill") \
+                        .to_numpy(np.float64)
 
-    sig = (close_px > kel_mid).astype(np.uint8)
+    sig = (df["close"].to_numpy(np.float64) > kel_mid).astype(np.uint8)
     return sig
+
 
 
 

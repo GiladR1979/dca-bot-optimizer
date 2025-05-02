@@ -35,18 +35,21 @@ class DCATrailingStrategy:
         self.reopen_sec = reopen_sec               # ← store it!
 
     # ------------------------------------------------------------------
-    # ------------------------------------------------------------------
     @staticmethod
     def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
         """
-        Only one indicator:
-        • kel_mid   – 20-EMA (Keltner mid-line)
-        • entry_sig – True when close > kel_mid  (risk-on)
+        4-hour Keltner filter:
+          • kel_mid_4h  – EMA-20 of 4-hour closes,
+                          forward-filled back onto 1-minute rows
+          • entry_sig   – close > kel_mid_4h
         """
-        kel_mid = df["close"].ewm(span=20, adjust=False).mean()
+        # -------- 4-hour resample ---------------------------------------
+        close_4h = df["close"].resample("4h").last().dropna()
+        kel_mid_4h = close_4h.ewm(span=20, adjust=False).mean()
 
+        # -------- forward-fill onto 1-minute index ----------------------
         df = df.copy()
-        df["kel_mid"] = kel_mid
+        df["kel_mid"] = kel_mid_4h.reindex(df.index, method="ffill")
         df["entry_sig"] = (df["close"] > df["kel_mid"]).fillna(False)
         return df
 
