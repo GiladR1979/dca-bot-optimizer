@@ -9,7 +9,7 @@ Pure-Python DCA strategy (trailing TP)
 from typing import List, Tuple, Optional
 
 import pandas as pd
-import ta
+from ta.volatility import AverageTrueRange
 
 
 class DCATrailingStrategy:
@@ -38,19 +38,34 @@ class DCATrailingStrategy:
     @staticmethod
     def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
         """
-        4-hour Keltner filter:
-          • kel_mid_4h  – EMA-20 of 4-hour closes,
-                          forward-filled back onto 1-minute rows
-          • entry_sig   – close > kel_mid_4h
+        Daily SuperTrend risk-on filter.
+          • st_bull  – True when SuperTrend is green (bullish)
+          • entry_sig – st_bull     ← ONLY this filter (no BB/RSI)
         """
-        # -------- 4-hour resample ---------------------------------------
-        close_4h = df["close"].resample("4h").last().dropna()
-        kel_mid_4h = close_4h.ewm(span=20, adjust=False).mean()
+        # ---------- build daily candles -------------------------------
+        daily = df["close"].resample("1D").last().dropna()
+        high_d = df["high"].resample("1D").max().loc[daily.index]
+        low_d = df["low"].resample("1D").min().loc[daily.index]
 
-        # -------- forward-fill onto 1-minute index ----------------------
+        atr10 = AverageTrueRange(high_d, low_d, daily, window=10).average_true_range()
+        hl2 = (high_d + low_d) / 2
+        upper = hl2 + 3 * atr10
+        lower = hl2 - 3 * atr10
+
+        # --- SuperTrend algorithm (vectorised) ------------------------
+        st = pd.Series(np.nan, index=daily.index)
+        dir = pd.Series(True, index=daily.index)  # True=bull, False=bear
+        for i in range(1, len(daily)):
+            if dir.iat[i - 1]:  # currently bull
+                st.iat[i] = max(lower.iat[i], st.iat[i - 1])
+                dir.iat[i] = daily.iat[i] > st.iat[i]
+            else:  # currently bear
+                st.iat[i] = min(upper.iat[i], st.iat[i - 1])
+                dir.iat[i] = daily.iat[i] > st.iat[i]
+        st_bull = dir.reindex(df.index, method="ffill").fillna(False)
+
         df = df.copy()
-        df["kel_mid"] = kel_mid_4h.reindex(df.index, method="ffill")
-        df["entry_sig"] = (df["close"] > df["kel_mid"]).fillna(False)
+        df["entry_sig"] = st_bull  # <-- our ONLY trigger
         return df
 
     # ------------------------------------------------------------------

@@ -22,18 +22,41 @@ from numba.typed import List as NbList
 
 # =====================  Python-side helpers  ======================= #
 def _build_entry_signal(df: pd.DataFrame) -> np.ndarray:
-    """
-    4-hour EMA-20 risk-on array (uint8).
-    """
-    close_4h = df["close"].resample("4h").last().dropna()
-    kel_mid = close_4h.ewm(span=20, adjust=False).mean() \
-                        .reindex(df.index, method="ffill") \
-                        .to_numpy(np.float64)
+    """Daily SuperTrend → 1-minute risk-on array (uint8)."""
+    # --- 1-day OHLC via resample ------------------------------------
+    hi_d = df["high"].resample("1h").max()
+    lo_d = df["low"] .resample("1h").min()
+    cl_d = df["close"].resample("1h").last()
 
-    sig = (df["close"].to_numpy(np.float64) > kel_mid).astype(np.uint8)
-    return sig
+    atr = ta.volatility.AverageTrueRange(hi_d, lo_d, cl_d, window=10).average_true_range()
+    hl2 = (hi_d + lo_d) / 2
+    upper = hl2 + 6 * atr
+    lower = hl2 - 6 * atr
 
+    # -------- convert to NumPy → position-safe & faster -------------
+    up   = upper.to_numpy(np.float64)
+    lo   = lower.to_numpy(np.float64)
+    close= cl_d.to_numpy(np.float64)
 
+    st   = np.full(len(close), np.nan, dtype=np.float64)
+    dir  = np.ones(len(close), dtype=np.uint8)      # 1 = bullish
+
+    for i in range(1, len(close)):
+        if dir[i-1]:                                # currently bullish
+            st[i]  = max(lo[i],  st[i-1] if not np.isnan(st[i-1]) else lo[i])
+            dir[i] = close[i] > st[i]
+        else:                                       # currently bearish
+            st[i]  = min(up[i], st[i-1] if not np.isnan(st[i-1]) else up[i])
+            dir[i] = close[i] > st[i]
+
+    # -------- forward-fill onto 1-minute frame ----------------------
+    dir_1m = (
+        pd.Series(dir, index=cl_d.index)
+          .reindex(df.index, method="ffill")
+          .fillna(0)
+          .to_numpy(np.uint8)
+    )
+    return dir_1m
 
 
 # =========================  Strategy class  ======================== #
@@ -114,9 +137,17 @@ def _run_loop_nb(
         t = ts[i]
         p = px[i]
 
-        # ---------- open logic ---------------------------------------
-        open_sig  = (sig[i] == 1) if use_sig == 1 else False
-        open_time = (t >= last_close + reopen_sec) if use_sig == 0 else False
+        # ---------- open logic ---------------------------------------------
+        risk_on = sig[i] == 1  # 1 = allowed, 0 = blocked
+
+        if use_sig == 1:  # smart mode
+            open_sig = risk_on  # ← only when signal is 1
+            open_time = False
+
+        else:  # use_sig == 0  (timer mode)
+            open_sig = False
+            open_time = risk_on and (t >= last_close + reopen_sec)
+            # ← timer AND signal must agree
 
         if (not in_trade) and (open_sig or open_time):
             fee = usd_per_order * fee_rate
