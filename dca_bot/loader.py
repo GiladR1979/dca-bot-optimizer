@@ -57,7 +57,7 @@ def _klines(symbol: str,
     data, cur = [], start_ms
     while cur < end_ms:
         try:
-            r = session.get(url, params=params | {"startTime": cur}, timeout=30)
+            r = session.get(url, params={**params, "startTime": cur}, timeout=30)
             r.raise_for_status()
         except (requests.exceptions.ReadTimeout,
                 requests.exceptions.ConnectionError) as err:
@@ -67,7 +67,7 @@ def _klines(symbol: str,
                 print(f"Timeout – retry {attempt}/5 in {wait}s …")
                 time.sleep(wait)
                 try:
-                    r = session.get(url, params=params | {"startTime": cur}, timeout=30)
+                    r = session.get(url, params={**params, "startTime": cur}, timeout=30)
                     r.raise_for_status()
                     break
                 except Exception:

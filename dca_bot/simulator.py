@@ -58,35 +58,45 @@ def calc_metrics(deals: List[DealRow],
     total_pl = sum(d[2] for d in closed)
     roi_pct  = total_pl / 1000 * 100        # base capital = 1 000 USD
 
-    start, end = equity[0][0], equity[-1][0]
-    years = (end - start) / (365 * 24 * 3600)
-    annual_pct = roi_pct / years if years > 0 else 0  # linear, no reinvest
-    annual_usd = 1000 * annual_pct / 100  # on the same $1 000 base
+    # ----- time span for annualisation (closed deals only) ---------------
+    if closed:
+        first_open  = closed[0][0]
+        last_close  = closed[-1][1]
+        years = (last_close - first_open) / (365 * 24 * 3600)
+    else:
+        # fall back to full equity window when nothing has closed yet
+        years = (equity[-1][0] - equity[0][0]) / (365 * 24 * 3600)
 
-    # ---------------- drawdown vs. initial balance ---------------------
-    initial_bal = 1000.0  # same base you use for ROI
+    years = max(years, 1 / 365)                 # floor at one day
+    annual_pct = roi_pct / years                # linear APR (no compounding)
+    annual_usd = 1000 * annual_pct / 100        # still on the constant $1 000 base
 
-    min_val = min(v for _, v in equity)
-    max_dd = max(0.0, initial_bal - min_val)  # absolute USD loss
-    max_dd_pct = max_dd / initial_bal * 100
+    # ---------------- peak‑to‑valley max draw‑down ---------------------
+    peak          = equity[0][1]
+    max_dd_pct    = 0.0
+    longest       = 0        # longest underwater period (seconds)
+    in_drawdown   = False
+    dd_start_time = 0
 
-    # longest time the equity stayed below the initial balance
-    below = False
-    start_dd = 0
-    longest = 0
-    for t, val in equity:
-        if val < initial_bal:
-            if not below:
-                below = True
-                start_dd = t
+    for ts, bal in equity:
+        if bal > peak:
+            # New all‑time high resets draw‑down
+            peak = bal
+            if in_drawdown:
+                in_drawdown = False
+                longest = max(longest, ts - dd_start_time)
         else:
-            if below:
-                below = False
-                longest = max(longest, t - start_dd)
+            # Below peak → draw‑down
+            if not in_drawdown:
+                in_drawdown = True
+                dd_start_time = ts
+            dd = (peak - bal) / peak * 100
+            if dd > max_dd_pct:
+                max_dd_pct = dd
 
-    # if the bot finishes still under water
-    if below:
-        longest = max(longest, equity[-1][0] - start_dd)
+    # If we finish still underwater, extend longest DD to the end
+    if in_drawdown:
+        longest = max(longest, equity[-1][0] - dd_start_time)
 
     longest_min = longest / 60
 
