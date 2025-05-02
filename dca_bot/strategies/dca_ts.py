@@ -35,27 +35,19 @@ class DCATrailingStrategy:
         self.reopen_sec = reopen_sec               # ← store it!
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
     @staticmethod
     def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-        """Add bbp3, rsi3 and entry_sig columns (3-minute maths)."""
-        close_3m = df["close"].resample("3min").last().dropna()
-
-        ma  = close_3m.rolling(20, min_periods=20).mean()
-        sd  = close_3m.rolling(20, min_periods=20).std()
-        lo  = ma - 2 * sd
-        hi  = ma + 2 * sd
-        bbp3 = (close_3m - lo) / (hi - lo)
-
-        rsi3 = ta.momentum.RSIIndicator(close_3m, window=7).rsi()
+        """
+        Only one indicator:
+        • kel_mid   – 20-EMA (Keltner mid-line)
+        • entry_sig – True when close > kel_mid  (risk-on)
+        """
+        kel_mid = df["close"].ewm(span=20, adjust=False).mean()
 
         df = df.copy()
-        df["bbp3"] = bbp3.reindex(df.index, method="ffill")
-        df["rsi3"] = rsi3.reindex(df.index, method="ffill")
-
-        df["entry_sig"] = (
-            (df["bbp3"].shift(1) < 0) & (df["bbp3"] >= 0) & (df["rsi3"].shift(1) < 30)
-        ).fillna(False)
-
+        df["kel_mid"] = kel_mid
+        df["entry_sig"] = (df["close"] > df["kel_mid"]).fillna(False)
         return df
 
     # ------------------------------------------------------------------

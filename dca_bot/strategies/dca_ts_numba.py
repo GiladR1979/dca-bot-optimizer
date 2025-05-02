@@ -22,23 +22,15 @@ from numba.typed import List as NbList
 
 # =====================  Python-side helpers  ======================= #
 def _build_entry_signal(df: pd.DataFrame) -> np.ndarray:
-    """Return uint8 array (0/1) per 1-minute row for the smart trigger."""
-    close_3m = df["close"].resample("3min").last().dropna()
+    """
+    Return uint8 array: 1 when close > EMA-20  (risk-on), else 0.
+    """
+    kel_mid  = df["close"].ewm(span=20, adjust=False).mean().to_numpy(np.float64)
+    close_px = df["close"].to_numpy(np.float64)
 
-    ma = close_3m.rolling(20, min_periods=20).mean()
-    sd = close_3m.rolling(20, min_periods=20).std()
-    lo = ma - 2.0 * sd
-    hi = ma + 2.0 * sd
-    bbp3 = (close_3m - lo) / (hi - lo)
-
-    rsi3 = ta.momentum.RSIIndicator(close_3m, window=7).rsi()
-
-    bbp1 = bbp3.reindex(df.index, method="ffill").to_numpy(np.float64)
-    rsi1 = rsi3.reindex(df.index, method="ffill").to_numpy(np.float64)
-
-    sig = np.zeros(len(df), dtype=np.uint8)
-    sig[1:] = (bbp1[:-1] < 0) & (bbp1[1:] >= 0) & (rsi1[:-1] < 30)
+    sig = (close_px > kel_mid).astype(np.uint8)
     return sig
+
 
 
 # =========================  Strategy class  ======================== #
