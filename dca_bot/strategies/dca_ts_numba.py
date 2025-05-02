@@ -16,47 +16,47 @@ from typing import List, Tuple
 import numba as nb
 import numpy as np
 import pandas as pd
-import ta
+import pandas_ta as pta
 from numba.typed import List as NbList
 
 
 # =====================  Python-side helpers  ======================= #
 def _build_entry_signal(df: pd.DataFrame) -> np.ndarray:
-    """Daily SuperTrend → 1-minute risk-on array (uint8)."""
-    # --- 1-day OHLC via resample ------------------------------------
-    hi_d = df["high"].resample("1h").max()
-    lo_d = df["low"] .resample("1h").min()
-    cl_d = df["close"].resample("1h").last()
+    """
+    1-hour SuperTrend (ATR 10, factor 3) → uint8 array
+    1 = bullish, 0 = bearish.
 
-    atr = ta.volatility.AverageTrueRange(hi_d, lo_d, cl_d, window=10).average_true_range()
-    hl2 = (hi_d + lo_d) / 2
-    upper = hl2 + 6 * atr
-    lower = hl2 - 6 * atr
+    The signal is forward-filled onto the native 1-minute index so the
+    JIT loop can read it directly.
+    """
 
-    # -------- convert to NumPy → position-safe & faster -------------
-    up   = upper.to_numpy(np.float64)
-    lo   = lower.to_numpy(np.float64)
-    close= cl_d.to_numpy(np.float64)
+    # ----------- 1-hour OHLC via resample ---------------------------
+    ohlc_1h = df.resample("1h").agg(
+        high=("high", "max"),
+        low=("low", "min"),
+        close=("close", "last"),
+    ).dropna()
 
-    st   = np.full(len(close), np.nan, dtype=np.float64)
-    dir  = np.ones(len(close), dtype=np.uint8)      # 1 = bullish
-
-    for i in range(1, len(close)):
-        if dir[i-1]:                                # currently bullish
-            st[i]  = max(lo[i],  st[i-1] if not np.isnan(st[i-1]) else lo[i])
-            dir[i] = close[i] > st[i]
-        else:                                       # currently bearish
-            st[i]  = min(up[i], st[i-1] if not np.isnan(st[i-1]) else up[i])
-            dir[i] = close[i] > st[i]
-
-    # -------- forward-fill onto 1-minute frame ----------------------
-    dir_1m = (
-        pd.Series(dir, index=cl_d.index)
-          .reindex(df.index, method="ffill")
-          .fillna(0)
-          .to_numpy(np.uint8)
+    # ----------- pandas_ta supertrend ------------------------------
+    st = pta.supertrend(
+        high=ohlc_1h["high"],
+        low=ohlc_1h["low"],
+        close=ohlc_1h["close"],
+        length=10,          # ATR length
+        multiplier=3,       # factor
     )
-    return dir_1m
+
+    # Column names:  SUPERTd_10_3.0  (direction 1 / -1)
+    dir_col = [c for c in st.columns if c.startswith("SUPERTd")][0]
+    dir_1h  = (st[dir_col] == 1).astype(np.uint8)
+
+    # ----------- forward-fill onto 1-minute frame ------------------
+    risk_on = (
+        dir_1h.reindex(df.index, method="ffill")
+              .fillna(0)                    # NaN → bearish
+              .to_numpy(np.uint8)
+    )
+    return risk_on
 
 
 # =========================  Strategy class  ======================== #
