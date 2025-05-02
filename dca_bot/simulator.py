@@ -9,7 +9,7 @@ from typing import List, Tuple, Optional
 
 import numpy as np
 
-DealRow   = Tuple[Optional[int], Optional[int], float, float]
+DealRow   = Tuple[Optional[int], Optional[int], float, float, Optional[str]]
 EquityRow = Tuple[int, float]
 
 
@@ -49,11 +49,13 @@ def calc_metrics(deals: List[DealRow],
         return {}
 
     # ---------------- filter closed deals ---------------------------
-    closed = [
-        (int(s), int(e), p, f)
-        for s, e, p, f in deals
-        if (s is not None and e is not None and not _is_nan(s) and not _is_nan(e))
-    ]
+    closed = []
+    for row in deals:
+        # unpack first four mandatory fields; ignore any extras (e.g. exit_reason)
+        s, e, p, f, *rest = row
+        if s is None or e is None or _is_nan(s) or _is_nan(e):
+            continue
+        closed.append((int(s), int(e), p, f))
 
     total_pl = sum(d[2] for d in closed)
     roi_pct  = total_pl / 1000 * 100        # base capital = 1 000 USD
