@@ -49,6 +49,8 @@ class DCAJITStrategy:
     tp_pct: float = 0.6
     trailing: bool = True
     trailing_pct: float = 0.1
+    # hard stop‑loss (% below blended average buy price; 0 = off)
+    sl_pct: float = 30.0
     max_safety: int = 50
     fee_rate: float = 0.001
     initial_balance: float = 1000.0
@@ -75,7 +77,7 @@ class DCAJITStrategy:
         deals_rows, equity_rows = _run_loop_nb(
             ts, close, sig,
             self.spacing_pct, self.tp_pct, self.trailing,
-            self.trailing_pct, self.max_safety,
+            self.trailing_pct, self.sl_pct, self.max_safety,
             self.usd_per_order, self.fee_rate,
             self.initial_balance,
             self.reopen_sec, self.use_sig,
@@ -96,6 +98,7 @@ def _run_loop_nb(
     tp_pct: float,
     trailing: bool,
     trailing_pct: float,
+    sl_pct: float,
     max_safety: int,
     usd_per_order: float,
     fee_rate: float,
@@ -152,16 +155,27 @@ def _run_loop_nb(
             tp_price = avg * (1 + tp_pct / 100)
             trail_top = 0.0
 
-        # ---------- take-profit / trailing ---------------------------
+        # ---------- hard stop‑loss --------------------------------
         exit_now = False
-        if in_trade and p >= tp_price:
-            if trailing:
-                if p > trail_top:
-                    trail_top = p
-                if p <= trail_top * (1 - trailing_pct / 100):
-                    exit_now = True
-            else:
+        if in_trade and sl_pct > 0 and p <= avg * (1 - sl_pct / 100):
+            exit_now = True
+            # fall-through to exit handling below
+
+        # ---------- take-profit / trailing ---------------------------
+        # exit_now declared earlier
+        if in_trade:
+            # Stop‑loss first
+            if sl_pct > 0 and p <= avg * (1 - sl_pct / 100):
                 exit_now = True
+            # Take‑profit / trailing
+            elif p >= tp_price:
+                if trailing:
+                    if p > trail_top:
+                        trail_top = p
+                    if p <= trail_top * (1 - trailing_pct / 100):
+                        exit_now = True
+                else:
+                    exit_now = True
 
         if in_trade and exit_now:
             proceeds = qty * p

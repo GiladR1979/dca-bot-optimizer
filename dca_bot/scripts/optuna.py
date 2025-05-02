@@ -109,6 +109,7 @@ def main() -> None:
         tp_pct=0.6,
         trailing=True,
         trailing_pct=0.1,
+        sl_pct=30,          # hard stop‑loss 30 % below last buy (default)
     )
 
     def_m, def_png, item_def = run_set(

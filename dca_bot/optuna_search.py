@@ -18,13 +18,20 @@ import pandas as pd
 # ------------------------------------------------------------------ #
 _seen_params: set[tuple] = set()
 
-def _param_sig(spacing: float, tp: float, trailing: bool, trail_pct: float) -> tuple:
+def _param_sig(
+    spacing: float,
+    tp: float,
+    trailing: bool,
+    trail_pct: float,
+    sl_pct: int,
+) -> tuple:
     """Rounded signature so small FP noise does not count as new."""
     return (
         round(spacing, 3),
         round(tp, 3),
         bool(trailing),
         round(trail_pct, 3),
+        int(sl_pct),
     )
 import sqlalchemy
 import sqlalchemy.pool
@@ -45,6 +52,7 @@ def _evaluate(
     *,
     use_sig: int,
     reopen_sec: int,
+    sl_pct: int,
 ) -> Dict[str, float]:
     bot = DCATrailingStrategy(
         spacing_pct=spacing,
@@ -53,6 +61,7 @@ def _evaluate(
         trailing_pct=trail_pct,
         use_sig=use_sig,
         reopen_sec=reopen_sec,
+        sl_pct=sl_pct,
     )
     deals, eq = bot.backtest(df)
     return calc_metrics(deals, eq)
@@ -75,9 +84,10 @@ def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reop
         tp = trial.suggest_float("tp_pct", 0.5, 3.0, step=0.1)
         trailing = trial.suggest_categorical("trailing", [True, False])
         trail_pct = trial.suggest_float("trailing_pct", 0.1, 0.1, step=0.1)
+        sl_pct = trial.suggest_int("sl_pct", 5, 99, step=1)
 
         # ---- skip exact‑duplicate parameter sets --------------------
-        sig = _param_sig(spacing, tp, trailing, trail_pct)
+        sig = _param_sig(spacing, tp, trailing, trail_pct, sl_pct)
         if sig in _seen_params:
             raise optuna.TrialPruned()
         _seen_params.add(sig)
@@ -87,13 +97,13 @@ def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reop
             raise optuna.TrialPruned()
 
         # ---------- fast head‑run for early pruning --------------------
-        m_head = _evaluate(head, spacing, tp, trailing, trail_pct, use_sig=use_sig, reopen_sec=reopen_sec)
+        m_head = _evaluate(head, spacing, tp, trailing, trail_pct, use_sig=use_sig, reopen_sec=reopen_sec, sl_pct=sl_pct)
         trial.report(m_head[metric_key], step=0)
         if trial.should_prune():
             raise optuna.TrialPruned()
 
         # ---------- full back‑test ------------------------------------
-        m_full = _evaluate(df_full, spacing, tp, trailing, trail_pct, use_sig=use_sig, reopen_sec=reopen_sec)
+        m_full = _evaluate(df_full, spacing, tp, trailing, trail_pct, use_sig=use_sig, reopen_sec=reopen_sec, sl_pct=sl_pct)
         trial.set_user_attr("metrics", m_full)
         trial.set_user_attr(
             "params",
@@ -102,6 +112,7 @@ def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reop
                 "tp_pct": tp,
                 "trailing": trailing,
                 "trailing_pct": trail_pct,
+                "sl_pct": sl_pct,
             },
         )
         return m_full[metric_key]
@@ -122,6 +133,7 @@ def _register_trials(study: optuna.study.Study):
             t.params.get("tp_pct"),
             t.params.get("trailing"),
             t.params.get("trailing_pct"),
+            t.params.get("sl_pct"),
         )
         _seen_params.add(sig)
 
@@ -196,6 +208,7 @@ def seed_from(source: optuna.study.Study, dest: optuna.study.Study, metric_key: 
             cloned.params["tp_pct"],
             cloned.params["trailing"],
             cloned.params["trailing_pct"],
+            cloned.params["sl_pct"],
         )
         _seen_params.add(sig)
 
