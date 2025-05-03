@@ -39,8 +39,8 @@ def _build_entry_signal(df: pd.DataFrame, tf: str = "1D") -> np.ndarray:
 @dataclass
 class DCAJITStrategy:
     # ----- DCA ladder -----------------------------------------------
-    base_order:   float = 19.6078      # USDT first order
-    mult:         float = 1
+    base_order:   float = 6.5109      # USDT first order
+    mult:         float = 1.04
     max_safety:   int   = 50          # 50 safety + 1 base = 51 orders
     fee_rate:     float = 0.001
 
