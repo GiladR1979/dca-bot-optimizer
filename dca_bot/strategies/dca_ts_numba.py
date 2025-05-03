@@ -39,8 +39,10 @@ def _build_entry_signal(df: pd.DataFrame, tf: str = "1D") -> np.ndarray:
 @dataclass
 class DCAJITStrategy:
     # ----- DCA ladder -----------------------------------------------
-    base_order:   float = 6.5109      # USDT first order
-    mult:         float = 1.04
+    # base_order:   float = 6.5109      # USDT first order
+    # mult:         float = 1.04
+    base_order:   float = 16.6078      # USDT first order
+    mult:         float = 1.0
     max_safety:   int   = 50          # 50 safety + 1 base = 51 orders
     fee_rate:     float = 0.001
 
@@ -100,12 +102,15 @@ def _run_loop_nb(
     cost = 0.0
     entry = last_close = -1e18
 
+    prev_risk = 0  # remember previous SuperTrend state
+
     for i in range(n):
         t = ts[i]
         p = px[i]
 
         # -------- open conditions ----------------------------------
         risk_on = sig[i] == 1
+        trend_flip_down = (prev_risk == 1 and risk_on == 0)
         open_sig  = risk_on if use_sig == 1 else 0
         open_time = (risk_on and (t >= last_close + reopen_sec)) if use_sig == 0 else 0
 
@@ -142,6 +147,7 @@ def _run_loop_nb(
 
         # -------- take-profit / trailing ---------------------------
         exit_now = False
+        # trailing‑TP logic
         if in_trade and p >= tp_px:
             if trailing:
                 trail_top = max(trail_top, p)
@@ -149,6 +155,9 @@ def _run_loop_nb(
                     exit_now = True
             else:
                 exit_now = True
+        # NEW: exit immediately on SuperTrend flip to bearish
+        if in_trade and trend_flip_down:
+            exit_now = True
 
         if in_trade and exit_now:
             proceeds = qty * p
@@ -164,5 +173,7 @@ def _run_loop_nb(
 
         # -------- equity snapshot ----------------------------------
         equity.append(np.array((t, cash + qty * p), dtype=np.float64))
+
+        prev_risk = risk_on
 
     return deals, equity
