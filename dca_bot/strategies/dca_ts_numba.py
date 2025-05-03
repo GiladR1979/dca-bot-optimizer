@@ -31,7 +31,7 @@ def _build_entry_signal(df: pd.DataFrame) -> np.ndarray:
     """
 
     # ----------- 1-hour OHLC via resample ---------------------------
-    ohlc_1h = df.resample("1h").agg(
+    ohlc_1h = df.resample("15min").agg(
         high=("high", "max"),
         low=("low", "min"),
         close=("close", "last"),
