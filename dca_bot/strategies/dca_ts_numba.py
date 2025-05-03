@@ -16,7 +16,7 @@ from numba.typed import List as NbList
 
 
 # =====================  Trend-filter helper  ======================= #
-def _build_entry_signal(df: pd.DataFrame, tf: str = "1D") -> np.ndarray:
+def _build_entry_signal(df: pd.DataFrame, tf: str = "8h") -> np.ndarray:
     ohlc = df.resample(tf).agg(
         high=("high", "max"),
         low=("low", "min"),
