@@ -16,7 +16,7 @@ from numba.typed import List as NbList
 
 
 # =====================  Trend-filter helper  ======================= #
-def _build_entry_signal(df: pd.DataFrame, tf: str = "8h") -> np.ndarray:
+def _build_entry_signal(df: pd.DataFrame, tf: str = "1D") -> np.ndarray:
     ohlc = df.resample(tf).agg(
         high=("high", "max"),
         low=("low", "min"),
@@ -24,7 +24,7 @@ def _build_entry_signal(df: pd.DataFrame, tf: str = "8h") -> np.ndarray:
     ).dropna()
 
     st = pta.supertrend(ohlc["high"], ohlc["low"], ohlc["close"],
-                        length=10, multiplier=3)
+                        length=10, multiplier=2)
     dir_col = [c for c in st.columns if c.startswith("SUPERTd")][0]
     risk_tf = (st[dir_col] == 1).astype(np.uint8)
 
@@ -45,6 +45,8 @@ class DCAJITStrategy:
     mult:         float = 1.0
     max_safety:   int   = 50          # 50 safety + 1 base = 51 orders
     fee_rate:     float = 0.001
+    compound:      bool  = True
+    risk_pct:      float = 0.0166078
 
     # ----- TP / trailing --------------------------------------------
     spacing_pct:  float = 1.0         # 1 % gap between ladder steps
@@ -66,14 +68,12 @@ class DCAJITStrategy:
         ts  = df.index.view("int64") // 1_000_000_000
         sig = _build_entry_signal(df)
 
-        deals_np, equity_np = _run_loop_nb(
-            ts, px, sig,
+        deals_np, equity_np = _run_loop_nb(ts, px, sig,
             self.spacing_pct, self.tp_pct, self.trailing, self.trailing_pct,
             self.max_safety,
             self.base_order, self.mult,    # NEW
             self.fee_rate, self.initial_balance,
-            self.reopen_sec, self.use_sig,
-        )
+            self.reopen_sec, self.use_sig, int(self.compound), self.risk_pct)
 
         deals  = [(int(r[0]), int(r[1]), float(r[2]), float(r[3])) for r in deals_np]
         equity = [(int(r[0]), float(r[1])) for r in equity_np]
@@ -82,15 +82,13 @@ class DCAJITStrategy:
 
 # ======================  Numba core loop  ========================== #
 @nb.njit(cache=True)
-def _run_loop_nb(
-    ts: np.ndarray, px: np.ndarray, sig: np.ndarray,
+def _run_loop_nb(ts: np.ndarray, px: np.ndarray, sig: np.ndarray,
     spacing_pct: float, tp_pct: float, trailing: bool, trailing_pct: float,
     max_safety: int,
     base_order: float, mult: float,          # NEW
     fee_rate: float,
     init_bal: float,
-    reopen_sec: int, use_sig: int,
-):
+    reopen_sec: int, use_sig: int, compound_int: int, risk_pct: float):
     n = len(px)
     deals   = NbList.empty_list(nb.float64[:])
     equity  = NbList.empty_list(nb.float64[:])
@@ -101,6 +99,7 @@ def _run_loop_nb(
     cash = init_bal
     cost = 0.0
     entry = last_close = -1e18
+    ladder0 = base_order
 
     prev_risk = 0  # remember previous SuperTrend state
 
@@ -115,11 +114,12 @@ def _run_loop_nb(
         open_time = (risk_on and (t >= last_close + reopen_sec)) if use_sig == 0 else 0
 
         if (not in_trade) and (open_sig or open_time):
-            usd = base_order
+            usd = cash * risk_pct if compound_int == 1 else base_order
             fee = usd * fee_rate
             qty = usd / p
             cash -= usd + fee
             cost = usd + fee
+            ladder0 = usd
 
             avg = p
             next_buy = p * (1 - spacing_pct / 100)
@@ -132,7 +132,7 @@ def _run_loop_nb(
         # -------- safety buys --------------------------------------
         elif in_trade and safety_cnt < max_safety and p <= next_buy:
             safety_cnt += 1
-            usd = base_order * (mult ** safety_cnt)
+            usd = ladder0 * (mult ** safety_cnt)
             fee = usd * fee_rate
             buy_qty = usd / p
 

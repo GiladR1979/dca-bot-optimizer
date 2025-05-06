@@ -19,9 +19,11 @@ class DCATrailingStrategy:
     def __init__(
         self,
         # ---- ladder ---------------------------------------------------
-        base_order: float = 6.5109,     # first order in USDT
-        mult:       float = 1.04,       # geometric factor
+        base_order: float = 16.6078,     # first order in USDT
+        mult:       float = 1.0,       # geometric factor
         max_safety: int   = 50,         # safety orders (base+50 = 51)
+        compound: bool = True,
+        risk_pct: float = 0.0166078,    # fraction of equity for base order when compounding
 
         # ---- trade parameters ----------------------------------------
         spacing_pct: float = 1.0,       # price gap for each next buy
@@ -48,6 +50,8 @@ class DCATrailingStrategy:
         self.fee_rate         = fee_rate
         self.initial_balance  = initial_balance
         self.reopen_sec       = reopen_sec
+        self.compound      = compound
+        self.risk_pct      = risk_pct
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -98,6 +102,7 @@ class DCATrailingStrategy:
         deal_entry = last_dca_ts = 0
         last_close = -1               # epoch of previous exit
 
+        ladder_base_usd = cash * self.risk_pct if self.compound else self.base_order  # dynamic ladder base per deal
         for ts, row in df.iterrows():
             price = row.close
             epoch = int(ts.timestamp())
@@ -114,6 +119,7 @@ class DCATrailingStrategy:
                 fee = usd * self.fee_rate
                 qty = usd / price
                 cash -= usd + fee
+                ladder_base_usd = usd
                 cost = usd + fee
 
                 avg_price = price
@@ -130,11 +136,12 @@ class DCATrailingStrategy:
                 and price <= next_buy
                 and epoch - last_dca_ts >= cooldown_sec):
                 dca_count += 1
-                usd = self.base_order * (self.mult ** dca_count)
+                usd = ladder_base_usd * (self.mult ** dca_count)
                 fee = usd * self.fee_rate
                 qty_buy = usd / price
 
                 cash -= usd + fee
+                ladder_base_usd = usd
                 cost += usd + fee
                 qty  += qty_buy
 

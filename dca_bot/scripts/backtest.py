@@ -21,9 +21,13 @@ def calc_metrics(deals, equity):
     # Ensure 'years' is never zero (or extremely small) to avoid overflow/NaN
     years = max(years, 1 / 365)  # floor at one day
 
-    roi_pct = (bal_end - initial_balance) / initial_balance * 100
-    annual_pct = roi_pct / years if years > 0 else 0  # linear APR (no compounding)
-    annual_usd = initial_balance * annual_pct / 100
+    initial_balance = equity[0][1]
+final_balance = equity[-1][1]
+days_span = max((equity[-1][0] - equity[0][0]) / (24 * 3600), 1)
+roi_pct = (final_balance / initial_balance - 1) * 100
+apy_pct = ((final_balance / initial_balance) ** (365 / days_span) - 1) * 100
+annual_pct = apy_pct
+annual_usd = initial_balance * annual_pct / 100
 
     wins = [d[2] for d in closed if d[2] > 0]
     losses = [d[2] for d in closed if d[2] <= 0]
@@ -46,6 +50,7 @@ def calc_metrics(deals, equity):
     return {
         "total_pl": total_pl,
         "roi_pct": roi_pct,
+        "apy_pct": apy_pct,
         "annual_pct": annual_pct,
         "annual_usd": annual_usd,
         "num_deals": num_deals,
