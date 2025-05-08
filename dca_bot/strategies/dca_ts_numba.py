@@ -16,7 +16,7 @@ from numba.typed import List as NbList
 
 
 # =====================  Trend-filter helper  ======================= #
-def _build_entry_signal(df: pd.DataFrame, tf: str = "1D") -> np.ndarray:
+def _build_entry_signal(df: pd.DataFrame, tf: str = "8h") -> np.ndarray:
     ohlc = df.resample(tf).agg(
         high=("high", "max"),
         low=("low", "min"),
@@ -24,7 +24,7 @@ def _build_entry_signal(df: pd.DataFrame, tf: str = "1D") -> np.ndarray:
     ).dropna()
 
     st = pta.supertrend(ohlc["high"], ohlc["low"], ohlc["close"],
-                        length=10, multiplier=2)
+                        length=10, multiplier=3)
     dir_col = [c for c in st.columns if c.startswith("SUPERTd")][0]
     risk_tf = (st[dir_col] == 1).astype(np.uint8)
 

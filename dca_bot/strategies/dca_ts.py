@@ -57,9 +57,9 @@ class DCATrailingStrategy:
     @staticmethod
     def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
         """Add a daily SuperTrend and expose it as Boolean entry_sig."""
-        daily_close = df["close"].resample("1D").last().dropna()
-        high_d      = df["high"].resample("1D").max().loc[daily_close.index]
-        low_d       = df["low"] .resample("1D").min().loc[daily_close.index]
+        daily_close = df["close"].resample("8h").last().dropna()
+        high_d      = df["high"].resample("8h").max().loc[daily_close.index]
+        low_d       = df["low"] .resample("8h").min().loc[daily_close.index]
 
         atr = AverageTrueRange(high_d, low_d, daily_close,
                                window=10).average_true_range()
