@@ -53,7 +53,12 @@ def calc_metrics(deals: List[DealRow], equity: List[EquityRow]) -> dict:
 
     # === Daily‑compounded APY ===
     apy_pct   = ((final_balance / initial_balance) ** (365 / days_span) - 1) * 100
-    annual_pct = apy_pct                            # legacy alias
+    annual_pct = apy_pct
+
+    # --- guard against complex numbers when ROI <= -100% ---
+    if isinstance(annual_pct, complex):
+        annual_pct = float(np.real(annual_pct))  # discard imaginary part
+                            # legacy alias
     annual_usd = initial_balance * annual_pct / 100
 
     # ---------------- peak‑to‑valley max draw‑down ---------------------
