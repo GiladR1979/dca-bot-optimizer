@@ -71,7 +71,7 @@ def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reop
 
     # ------------------------------------------------------------------ #
     def _objective(trial: optuna.Trial):
-        spacing = trial.suggest_float("spacing_pct", 0.3, 2.0, step=0.1)
+        spacing = trial.suggest_float("spacing_pct", 0.2, 2.0, step=0.1)
         tp = trial.suggest_float("tp_pct", 0.5, 3.0, step=0.1)
         trailing = trial.suggest_categorical("trailing", [True, False])
         trail_pct = trial.suggest_float("trailing_pct", 0.1, 0.1, step=0.1)
