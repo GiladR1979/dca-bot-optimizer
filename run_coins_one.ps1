@@ -50,7 +50,8 @@ foreach ($c in $coins) {
         $c.Start,
         $c.End,
         "--use-sig",  "1",          # ignore indicator
-        "--reopen-sec", "60"        # reopen 60 s after previous exit
+        "--reopen-sec", "60",        # reopen 60 s after previous exit
+        "--exit-on-flip", "0"
     ) + $commonFlags
 
     & $pythonExe @args

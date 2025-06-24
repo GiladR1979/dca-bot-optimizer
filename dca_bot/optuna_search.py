@@ -92,7 +92,7 @@ def make_objective(
         spacing = trial.suggest_float("spacing_pct", 0.3, 2.0, step=0.1)
         tp = trial.suggest_float("tp_pct", 0.5, 3.0, step=0.1)
         trailing = trial.suggest_categorical("trailing", [True, False])
-        trail_pct = trial.suggest_float("trailing_pct", 0.1, 0.5, step=0.1)
+        trail_pct = 0.1 if trailing else 0.0          # fixed value
 
         # ---- skip exact-duplicate parameter sets -----------------
         sig = _param_sig(spacing, tp, trailing, trail_pct)

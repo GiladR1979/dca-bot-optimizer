@@ -22,7 +22,7 @@ from numba.typed import List as NbList
 # --------------------------------------------------------------------- #
 #  helper – slow SuperTrend direction                                   #
 # --------------------------------------------------------------------- #
-def _entry_signal(df: pd.DataFrame, tf: str = "8h") -> np.ndarray:
+def _entry_signal(df: pd.DataFrame, tf: str = "15min") -> np.ndarray:
     ohlc = df.resample(tf).agg(
         high=("high", "max"),
         low=("low", "min"),

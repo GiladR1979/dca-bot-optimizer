@@ -20,7 +20,7 @@ import pandas_ta as pta
 
 
 # ------------------------------------------------------------------ #
-def _entry_signal(df: pd.DataFrame, tf: str = "8h") -> pd.Series:
+def _entry_signal(df: pd.DataFrame, tf: str = "15min") -> pd.Series:
     ohlc = df.resample(tf).agg(
         high=("high", "max"),
         low=("low", "min"),
