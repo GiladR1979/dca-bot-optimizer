@@ -13,8 +13,8 @@ RES = os.path.join(os.path.dirname(__file__), "..", "..", "results")
 os.makedirs(RES, exist_ok=True)
 
 
-def run_set(params, df, label, base):
-    deals, eq = DCATrailingStrategy(**params).backtest(df)
+def run_set(params, df, label, base, exit_on_flip):
+    deals, eq = DCATrailingStrategy(**params, exit_on_flip=bool(exit_on_flip)).backtest(df)
     met = calc_metrics(deals, eq)
     png = os.path.join(RES, f"{base}_{label}.png")
     equity_curve(eq, deals, label, png)
@@ -29,6 +29,7 @@ def main():
     pa.add_argument("--spacings", default="0.5,1,1.5,2")
     pa.add_argument("--tps", default="0.5,0.6,1")
     pa.add_argument("--trailing-pct", type=float, default=0.1)
+    pa.add_argument("--exit-on-flip", type=int, choices=[0, 1], default=1)
     pa.add_argument("-v", "--verbose", action="store_true")
     args = pa.parse_args()
 
@@ -43,7 +44,7 @@ def main():
                       "trailing_pct": 0.1}
 
     met_def, png_def, item_def = run_set(
-        default_params, df, "default", args.symbol)
+        default_params, df, "default", args.symbol, args.exit_on_flip)
 
     # --- grid search -------------------------------------------------
     grid = {

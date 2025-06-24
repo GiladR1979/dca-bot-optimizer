@@ -1,204 +1,198 @@
+"""
+Pure-Python dual-side DCA strategy with *flip-pending freeze*.
 
+`exit_on_flip` (bool, default **True**)
+---------------------------------------
+* **True** – original behaviour: close the running position the moment
+  the 8 h SuperTrend reverses.
+* **False** – keep the ladder alive, freeze new entries until the deal
+  exits ≥ 0, then allow trading in the new trend direction.
 """
-Dual‑side (long + short) DCA strategy for spot accounts.
-Positions flip automatically on every 8‑hour SuperTrend cross.
-Profit is measured as the net change in cash for each deal.
-"""
-from typing import List, Tuple, Optional
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import List, Tuple
+
 import numpy as np
 import pandas as pd
-from ta.volatility import AverageTrueRange
+import pandas_ta as pta
 
 
+# ------------------------------------------------------------------ #
+def _entry_signal(df: pd.DataFrame, tf: str = "8h") -> pd.Series:
+    ohlc = df.resample(tf).agg(
+        high=("high", "max"),
+        low=("low", "min"),
+        close=("close", "last"),
+    ).dropna()
+    st = pta.supertrend(ohlc["high"], ohlc["low"], ohlc["close"], length=10, multiplier=3)
+    dir_col = next(c for c in st.columns if c.startswith("SUPERTd"))
+    bull_tf = (st[dir_col] == 1).astype(int)
+    return bull_tf.reindex(df.index, method="ffill").fillna(0).astype(int)
+
+
+# ------------------------------------------------------------------ #
+@dataclass
 class DCATrailingStrategy:
-def __init__(
-    self,
-    base_order: float = 16.6078,
-    mult: float = 1.0,
-    max_safety: int = 50,
-    compound: bool = True,
-    risk_pct: float = 0.0166078,
-    spacing_pct: float = 1.0,
-    tp_pct: float = 0.6,
-    trailing: bool = True,
-    trailing_pct: float = 0.1,
-    fee_rate: float = 0.001,
-    initial_balance: float = 1000.0,
-    reopen_sec: Optional[int] = None,
-    use_sig: bool = True,
-    **_ignored,
-):
-        self.base_order = base_order
-        self.mult = mult
-        self.max_safety = max_safety
-        self.compound = compound
-        self.risk_pct = risk_pct
-        self.spacing_pct = spacing_pct
-        self.tp_pct = tp_pct
-        self.trailing = trailing
-        self.trailing_pct = trailing_pct
-        self.fee_rate = fee_rate
-        self.initial_balance = initial_balance
-        self.reopen_sec = reopen_sec
+    # sizing
+    base_order: float = 16.6078
+    mult: float = 1.0
+    max_safety: int = 50
+    fee_rate: float = 0.001
+    compound: bool = True
+    risk_pct: float = 0.0166078
 
-    # ---------------------------------------------------------------
-    @staticmethod
-    def _supertrend_signal(df: pd.DataFrame) -> pd.Series:
-        tf = "8h"
-        hlc = df.resample(tf).agg(
-            high=("high", "max"),
-            low=("low", "min"),
-            close=("close", "last"),
-        ).dropna()
+    # grid
+    spacing_pct: float = 1.0
+    tp_pct: float = 0.6
+    trailing: bool = False
+    trailing_pct: float = 0.1
 
-        atr = AverageTrueRange(hlc["high"], hlc["low"], hlc["close"], window=10).average_true_range()
-        hl2 = (hlc["high"] + hlc["low"]) / 2
-        upper = hl2 + 3 * atr
-        lower = hl2 - 3 * atr
+    # session
+    initial_balance: float = 1_000.0
+    reopen_sec: int = 60
+    exit_on_flip: bool = True
+    use_sig: bool = True
 
-        st = pd.Series(np.nan, index=hlc.index)
-        bull = pd.Series(True, index=hlc.index)
-
-        for i in range(1, len(hlc)):
-            if bull.iat[i - 1]:
-                st.iat[i] = max(lower.iat[i], st.iat[i - 1] if not np.isnan(st.iat[i - 1]) else lower.iat[i])
-                bull.iat[i] = hlc['close'].iat[i] > st.iat[i]
-            else:
-                st.iat[i] = min(upper.iat[i], st.iat[i - 1] if not np.isnan(st.iat[i - 1]) else upper.iat[i])
-                bull.iat[i] = hlc['close'].iat[i] > st.iat[i]
-
-        return bull.reindex(df.index, method="ffill").fillna(False)
-
-    # ---------------------------------------------------------------
-    def backtest(self, df: pd.DataFrame, cooldown_sec: int = 60) -> Tuple[List[Tuple], List[Tuple]]:
-        df = df.copy()
-        df["bull"] = self._supertrend_signal(df)
+    # -------------------------------------------------------------- #
+    def run(self, df: pd.DataFrame) -> Tuple[List[Tuple[int, int, float, float]],
+                                             List[Tuple[int, float]]]:
+        ts = df.index.astype("int64") // 10 ** 9
+        px = df["close"].to_numpy(float)
+        bull = _entry_signal(df).to_numpy(int)
 
         cash = self.initial_balance
-        qty = 0.0
-        avg_price = 0.0
-
-        state = "idle"
+        qty = avg = ladder0 = 0.0
+        in_trade = False
         side = 0
-        ladder0 = self.base_order
-        dca_count = 0
-        next_order = 0.0
-        trailing_extreme = 0.0
+        safety_cnt = 0
+        next_order = trail_ext = 0.0
         cash_start = 0.0
-        deal_entry_ts = 0
-        last_close_ts = -1
+        entry_ts = 0
 
-        deals: List[Tuple] = []
-        equity: List[Tuple] = []
+        last_close = -1_000_000
+        flip_pending = False
 
-        for ts, row in df.iterrows():
-            epoch = int(ts.timestamp())
-            price = row.close
-            equity.append((epoch, cash + qty * price))
+        deals: List[Tuple[int, int, float, float]] = []
+        equity: List[Tuple[int, float]] = []
+        snapshot_step = 30 * 60  # sec
 
-            bull = bool(row.bull)
+        for i, p in enumerate(px):
+            t = int(ts[i])
+            trend_bull = bull[i] == 1
 
-            if state == "idle":
-                open_long = bull and self._can_reopen(epoch, last_close_ts)
-                open_short = (not bull) and self._can_reopen(epoch, last_close_ts)
-                if not (open_long or open_short):
+            # -------- open trade -----------------------------------
+            if not in_trade:
+                if flip_pending:
+                    if i % snapshot_step == 0:
+                        equity.append((t, cash))
                     continue
 
-                side = 1 if open_long else -1
-                usd = self._base_usd(cash)
-                fee = usd * self.fee_rate
-                qty_change = side * usd / price
+                reopen_ok = (self.reopen_sec == -1) or (t >= last_close + self.reopen_sec)
+                open_long = trend_bull and reopen_ok
+                open_short = (not trend_bull) and reopen_ok
 
-                cash_start = cash  # snapshot
+                if open_long or open_short:
+                    side = 1 if open_long else -1
+                    usd = cash * self.risk_pct if self.compound else self.base_order
+                    fee = usd * self.fee_rate
+                    qty_change = side * usd / p
 
-                if side == 1:
-                    cash -= usd + fee
-                else:
-                    cash += usd - fee
+                    cash_start = cash
+                    entry_ts = t
 
-                qty += qty_change
-                avg_price = price
-                ladder0 = usd
-                dca_count = 0
-                next_order = price * (1 - self.spacing_pct / 100) if side == 1 else price * (1 + self.spacing_pct / 100)
-                trailing_extreme = price
-                deal_entry_ts = epoch
-                state = "active"
+                    if side == 1:
+                        cash -= usd + fee
+                    else:
+                        cash += usd - fee
+
+                    qty = qty_change
+                    avg = p
+                    ladder0 = usd
+                    safety_cnt = 0
+                    next_order = p * (1 - self.spacing_pct / 100) if side == 1 else p * (1 + self.spacing_pct / 100)
+                    trail_ext = p
+                    in_trade = True
+
+            if not in_trade:
+                if i % snapshot_step == 0:
+                    equity.append((t, cash))
                 continue
 
-            # ---------- safety orders ----------
-            need_safety = (side == 1 and price <= next_order) or (side == -1 and price >= next_order)
-            if state == "active" and need_safety and dca_count < self.max_safety and epoch - deal_entry_ts >= cooldown_sec:
-                dca_count += 1
-                usd = ladder0 * (self.mult ** dca_count)
-                fee = usd * self.fee_rate
-                qty_change = side * usd / price
+            # -------- safety order ---------------------------------
+            if safety_cnt < self.max_safety:
+                if (side == 1 and p <= next_order) or (side == -1 and p >= next_order):
+                    usd = ladder0 * (self.mult ** (safety_cnt + 1))
+                    qty_change = side * usd / p
+                    fee = usd * self.fee_rate
 
-                if side == 1:
-                    cash -= usd + fee
-                else:
-                    cash += usd - fee
+                    if side == 1:
+                        cash -= usd + fee
+                    else:
+                        cash += usd - fee
 
-                # update average price
-                qty_old = qty
-                qty += qty_change
-                avg_price = (avg_price * abs(qty_old) + price * abs(qty_change)) / abs(qty)
+                    qty += qty_change
+                    avg = (avg * (abs(qty) - abs(qty_change)) + abs(qty_change) * p) / abs(qty)
+                    safety_cnt += 1
+                    next_order = p * (1 - self.spacing_pct / 100) if side == 1 else p * (1 + self.spacing_pct / 100)
 
-                next_order = price * (1 - self.spacing_pct / 100) if side == 1 else price * (1 + self.spacing_pct / 100)
-                trailing_extreme = price
-                deal_entry_ts = epoch
-
-            # ---------- TP / trailing ----------
-            tp_target = avg_price * (1 + self.tp_pct / 100) if side == 1 else avg_price * (1 - self.tp_pct / 100)
-            tp_hit = (side == 1 and price >= tp_target) or (side == -1 and price <= tp_target)
-
+            # -------- TP / trailing --------------------------------
+            tp_target = avg * (1 + self.tp_pct / 100) if side == 1 else avg * (1 - self.tp_pct / 100)
             exit_now = False
-            if tp_hit:
+            if (side == 1 and p >= tp_target) or (side == -1 and p <= tp_target):
                 if self.trailing:
                     if side == 1:
-                        trailing_extreme = max(trailing_extreme, price)
-                        if price <= trailing_extreme * (1 - self.trailing_pct / 100):
+                        if p > trail_ext:
+                            trail_ext = p
+                        if p <= trail_ext * (1 - self.trailing_pct / 100):
                             exit_now = True
                     else:
-                        trailing_extreme = min(trailing_extreme, price)
-                        if price >= trailing_extreme * (1 + self.trailing_pct / 100):
+                        if p < trail_ext:
+                            trail_ext = p
+                        if p >= trail_ext * (1 + self.trailing_pct / 100):
                             exit_now = True
                 else:
                     exit_now = True
 
-            trend_flip = (side == 1 and not bull) or (side == -1 and bull)
+            # -------- flip-pending freeze --------------------------
+            trend_flip = (side == 1 and not trend_bull) or (side == -1 and trend_bull)
             if trend_flip:
-                exit_now = True
+                if self.exit_on_flip:
+                    exit_now = True
+                else:
+                    flip_pending = True
 
-            # ---------- close ----------
-            if state == "active" and exit_now:
+            # -------- close deal ----------------------------------
+            if exit_now:
                 if side == 1:
-                    proceeds = abs(qty) * price
+                    proceeds = abs(qty) * p
                     fee = proceeds * self.fee_rate
                     cash += proceeds - fee
                 else:
-                    buy_cost = abs(qty) * price
-                    fee = buy_cost * self.fee_rate
-                    cash -= buy_cost + fee
+                    cost = abs(qty) * p
+                    fee = cost * self.fee_rate
+                    cash -= cost + fee
 
                 profit = cash - cash_start
-                deals.append((deal_entry_ts, epoch, round(profit, 4), round(fee, 4)))
+                deals.append((entry_ts, t, profit, fee))
 
-                qty = 0.0
-                avg_price = 0.0
-                state = "idle"
-                side = 0
-                last_close_ts = epoch
+                qty = avg = 0.0
+                in_trade = False
+                safety_cnt = 0
+                next_order = trail_ext = 0.0
+                last_close = t
+                flip_pending = False
 
-        # final equity snapshot
-        if equity and equity[-1][0] != int(df.index[-1].timestamp()):
-            equity.append((int(df.index[-1].timestamp()), cash + qty * df['close'].iat[-1]))
+            # -------- equity snapshot -----------------------------
+            if i % snapshot_step == 0:
+                equity.append((t, cash + qty * p))
+
+        if not equity or equity[-1][0] != ts[-1]:
+            equity.append((int(ts[-1]), cash + qty * px[-1]))
 
         return deals, equity
 
-    # ---------- helpers ----------
-    def _can_reopen(self, now: int, last_close: int) -> bool:
-        return self.reopen_sec is None or now >= last_close + self.reopen_sec
-
-    def _base_usd(self, cash: float) -> float:
-        return cash * self.risk_pct if self.compound else self.base_order
+    # legacy name
+    def backtest(self, df: pd.DataFrame):
+        return self.run(df)

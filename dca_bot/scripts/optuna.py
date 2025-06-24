@@ -4,10 +4,13 @@ re-tests the winning parameter sets.
 
 New flags
 ---------
---use-sig    1 (default) = wait for Bollinger+RSI trigger
-             0           = ignore trigger
+--use-sig        1 (default) = wait for Bollinger+RSI trigger
+                 0           = ignore trigger
 
---reopen-sec N   Seconds to wait after a deal closes when --use-sig is 0
+--reopen-sec N   Seconds to wait after a deal closes when --use-sig 0
+
+--exit-on-flip   0 = *freeze* on slow-trend reversal (no loss realised)
+                 1 = close immediately (legacy behaviour, default)
 """
 
 import argparse
@@ -23,9 +26,11 @@ from ..strategies.dca_ts_numba import DCAJITStrategy as DCATrailingStrategy
 from ..simulator import calc_metrics
 from ..plotting import equity_curve, panel
 
+
 # -------------------------------------------------------------------- constants
 RES = os.path.join(os.path.dirname(__file__), "..", "..", "results")
 os.makedirs(RES, exist_ok=True)
+
 
 # -------------------------------------------------------------------- helpers
 def run_set(
@@ -35,9 +40,15 @@ def run_set(
     base: str,
     use_sig: int,
     reopen_sec: int,
+    exit_on_flip: int,
 ) -> Tuple[Dict, str, Tuple]:
     """Back-test one parameter set and return (metrics, PNG path, panel item)."""
-    bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec)
+    bot = DCATrailingStrategy(
+        **params,
+        use_sig=use_sig,
+        reopen_sec=reopen_sec,
+        exit_on_flip=bool(exit_on_flip),
+    )
     deals, eq = bot.backtest(df)
     met = calc_metrics(deals, eq)
 
@@ -45,6 +56,7 @@ def run_set(
     equity_curve(eq, deals, label, png)
 
     return met, png, (eq, deals, label)
+
 
 # -------------------------------------------------------------------- main CLI
 def main() -> None:
@@ -62,12 +74,11 @@ def main() -> None:
 
     # NEW flags -------------------------------------------------------
     pa.add_argument("--use-sig", type=int, choices=[0, 1], default=1,
-                    help="1 = use Bollinger/RSI trigger (default); "
-                         "0 = ignore trigger")
+                    help="1 = use Bollinger/RSI trigger (default); 0 = ignore trigger")
     pa.add_argument("--reopen-sec", type=int, default=60,
-                    help="Delay before reopening when --use-sig 0 "
-                         "(default 60 s)")
-
+                    help="Delay before reopening when --use-sig 0 (default 60 s)")
+    pa.add_argument("--exit-on-flip", type=int, choices=[0, 1], default=1,
+                    help="0 = freeze on trend flip, 1 = close immediately (default)")
     pa.add_argument("-v", "--verbose", action="store_true")
     args = pa.parse_args()
 
@@ -82,9 +93,10 @@ def main() -> None:
     # ------------------------------------------------ load candles
     df = load_binance(args.symbol, args.start, args.end, "1m")
     if df.empty:
-        sys.exit("No candles returned – check date range.")
+        print("No candles returned – check symbol and date range", file=sys.stderr)
+        sys.exit(1)
 
-    # ------------------------------------------------ run three studies
+    # ------------------------------------------------ run three Optuna studies
     best_st, safe_st, fast_st = run_three_studies(
         df,
         symbol=args.symbol,
@@ -93,6 +105,7 @@ def main() -> None:
         storage=args.storage,
         use_sig=args.use_sig,
         reopen_sec=args.reopen_sec,
+        exit_on_flip=args.exit_on_flip,
     )
 
     def _pick(study):
@@ -103,7 +116,7 @@ def main() -> None:
     safe_p, _ = _pick(safe_st)
     fast_p, _ = _pick(fast_st)
 
-    # ------------------------------------------------ baseline default
+    # ------------------------------------------------ baseline
     default_p = dict(
         spacing_pct=1,
         tp_pct=0.6,
@@ -112,16 +125,20 @@ def main() -> None:
     )
 
     def_m, def_png, item_def = run_set(
-        default_p, df, "default", args.symbol, args.use_sig, args.reopen_sec
+        default_p, df, "default", args.symbol,
+        args.use_sig, args.reopen_sec, args.exit_on_flip
     )
     best_m, best_png, item_best = run_set(
-        best_p, df, "best", args.symbol, args.use_sig, args.reopen_sec
+        best_p, df, "best", args.symbol,
+        args.use_sig, args.reopen_sec, args.exit_on_flip
     )
     safe_m, safe_png, item_safe = run_set(
-        safe_p, df, "safe", args.symbol, args.use_sig, args.reopen_sec
+        safe_p, df, "safe", args.symbol,
+        args.use_sig, args.reopen_sec, args.exit_on_flip
     )
     fast_m, fast_png, item_fast = run_set(
-        fast_p, df, "fast", args.symbol, args.use_sig, args.reopen_sec
+        fast_p, df, "fast", args.symbol,
+        args.use_sig, args.reopen_sec, args.exit_on_flip
     )
 
     # ------------------------------------------------ triple comparison panel
