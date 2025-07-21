@@ -12,7 +12,7 @@ import pandas_ta as pta
 from numba.typed import List as NbList
 
 
-def _entry_signal(df: pd.DataFrame, tf: str = "8h") -> np.ndarray:
+def _entry_signal(df: pd.DataFrame, tf: str = "30min") -> np.ndarray:
     ohlc = df.resample(tf).agg(
         high=("high", "max"),
         low=("low", "min"),
@@ -39,6 +39,7 @@ class DCAJITStrategy:
     initial_balance: float = 1000.0
     use_sig: int = 1  # compatibility placeholder
     reopen_sec: int = -1
+    long_only: bool = False
 
     def backtest(self, df: pd.DataFrame) -> Tuple[List[Tuple], List[Tuple]]:
         px = df['close'].to_numpy(np.float64)
@@ -51,7 +52,8 @@ class DCAJITStrategy:
             self.max_safety, self.base_order, self.mult,
             self.fee_rate, self.initial_balance,
             self.reopen_sec,
-            int(self.compound), self.risk_pct
+            int(self.compound), self.risk_pct,
+            int(self.long_only)
         )
 
         deals = [(int(r[0]), int(r[1]), float(r[2]), float(r[3])) for r in deals_np]
@@ -66,7 +68,8 @@ def _loop(
     spacing_pct: float, tp_pct: float, trailing_int: int, trailing_pct: float,
     max_safety: int, base_order: float, mult: float,
     fee_rate: float, init_cash: float,
-    reopen_sec: int, compound_int: int, risk_pct: float
+    reopen_sec: int, compound_int: int, risk_pct: float,
+    long_only_int: int
 ):
     n = len(px)
     deals = NbList.empty_list(nb.float64[:])
@@ -95,8 +98,13 @@ def _loop(
 
         # ------------- open trade -------------
         if not in_trade:
-            open_long = trend_bull and (reopen_sec == -1 or t >= last_close + reopen_sec)
-            open_short = (not trend_bull) and (reopen_sec == -1 or t >= last_close + reopen_sec)
+            if long_only_int == 1:
+                # Long-only mode
+                open_long = trend_bull and (reopen_sec == -1 or t >= last_close + reopen_sec)
+                open_short = False
+            else:
+                open_long = trend_bull and (reopen_sec == -1 or t >= last_close + reopen_sec)
+                open_short = (not trend_bull) and (reopen_sec == -1 or t >= last_close + reopen_sec)
             if not (open_long or open_short):
                 continue
 

@@ -26,6 +26,7 @@ def __init__(
     initial_balance: float = 1000.0,
     reopen_sec: Optional[int] = None,
     use_sig: bool = True,
+    long_only: bool = False,
     **_ignored,
 ):
         self.base_order = base_order
@@ -40,11 +41,12 @@ def __init__(
         self.fee_rate = fee_rate
         self.initial_balance = initial_balance
         self.reopen_sec = reopen_sec
+        self.long_only = long_only
 
     # ---------------------------------------------------------------
     @staticmethod
     def _supertrend_signal(df: pd.DataFrame) -> pd.Series:
-        tf = "8h"
+        tf = "30min"
         hlc = df.resample(tf).agg(
             high=("high", "max"),
             low=("low", "min"),
@@ -99,8 +101,13 @@ def __init__(
             bull = bool(row.bull)
 
             if state == "idle":
-                open_long = bull and self._can_reopen(epoch, last_close_ts)
-                open_short = (not bull) and self._can_reopen(epoch, last_close_ts)
+                if self.long_only:
+                    # Long-only mode: only open when bullish
+                    open_long = bull and self._can_reopen(epoch, last_close_ts)
+                    open_short = False
+                else:
+                    open_long = bull and self._can_reopen(epoch, last_close_ts)
+                    open_short = (not bull) and self._can_reopen(epoch, last_close_ts)
                 if not (open_long or open_short):
                     continue
 

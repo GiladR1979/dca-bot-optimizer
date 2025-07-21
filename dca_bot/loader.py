@@ -26,7 +26,8 @@ from requests.adapters import HTTPAdapter, Retry
 def _klines(symbol: str,
             start_ms: int,
             end_ms: int,
-            interval: str = "1m"):
+            interval: str = "1s",
+            callback=None):
     """
     Fetch up to 1000 klines in one call with automatic retries and
     exponential back‑off.  Raises after 5 failed attempts.
@@ -39,7 +40,7 @@ def _klines(symbol: str,
         HTTPAdapter(
             max_retries=Retry(
                 total=5,
-                backoff_factor=1.5,                # 1.5 s, 3 s, 4.5 s …
+                backoff_factor=1.5,                # 1.5 s, 3 s, 4.5 s …
                 status_forcelist=[429, 500, 502, 503, 504],
                 allowed_methods=["GET"],
             )
@@ -83,6 +84,9 @@ def _klines(symbol: str,
                  len(data) // 1000,
                  len(batch),
                  datetime.utcfromtimestamp(batch[-1][0] / 1000))
+        # Call the callback if provided
+        if callback:
+            callback(len(data), len(batch), datetime.utcfromtimestamp(batch[-1][0] / 1000))
         time.sleep(0.03)
     return data
 
@@ -101,11 +105,17 @@ def _cache_path(symbol, interval):
     return os.path.join(DATA_DIR, fname)
 
 
-def load_binance(symbol, start, end, interval="1m"):
+def load_binance(symbol, start, end, interval="1s", callback=None):
     """
     Return a DataFrame of candles for [start, end] (inclusive),
     downloading only what isn't cached yet.
     """
+    # Default callback for progress printing
+    if callback is None:
+        def default_callback(total_candles, batch_size, last_ts):
+            print(f"Downloaded {total_candles} candles (batch of {batch_size}) up to {last_ts}")
+        callback = default_callback
+
     cache_file = _cache_path(symbol, interval)
     start_dt = pd.to_datetime(start, utc=True).tz_localize(None)
     end_dt   = pd.to_datetime(end,   utc=True).tz_localize(None)
@@ -139,7 +149,7 @@ def load_binance(symbol, start, end, interval="1m"):
                      int(start_dt.timestamp()*1000),
                      int((have_start - pd.Timedelta("1ms")).timestamp()*1000)
                      if have_start else int(end_dt.timestamp()*1000),
-                     interval)
+                     interval, callback=callback)
         if rs:
             frames.append(_to_df(rs))
     if need_back:
@@ -148,7 +158,7 @@ def load_binance(symbol, start, end, interval="1m"):
                      int((have_end + pd.Timedelta("1ms")).timestamp()*1000)
                      if have_end else int(start_dt.timestamp()*1000),
                      int(end_dt.timestamp()*1000),
-                     interval)
+                     interval, callback=callback)
         if rs:
             frames.append(_to_df(rs))
 

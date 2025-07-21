@@ -34,7 +34,7 @@ def main():
 
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                         format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
-    df = load_binance(args.symbol, args.start, args.end, "1m")
+    df = load_binance(args.symbol, args.start, args.end, "1s")
 
     # --- default run -------------------------------------------------
     default_params = {"spacing_pct": 1,

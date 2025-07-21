@@ -35,9 +35,10 @@ def run_set(
     base: str,
     use_sig: int,
     reopen_sec: int,
+    long_only: bool = False,
 ) -> Tuple[Dict, str, Tuple]:
     """Back-test one parameter set and return (metrics, PNG path, panel item)."""
-    bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec)
+    bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only)
     deals, eq = bot.backtest(df)
     met = calc_metrics(deals, eq)
 
@@ -67,6 +68,8 @@ def main() -> None:
     pa.add_argument("--reopen-sec", type=int, default=60,
                     help="Delay before reopening when --use-sig 0 "
                          "(default 60 s)")
+    pa.add_argument("--long-only", type=int, choices=[0, 1], default=0,
+                    help="1 = long positions only, 0 = both long and short (default)")
 
     pa.add_argument("-v", "--verbose", action="store_true")
     args = pa.parse_args()
@@ -80,7 +83,7 @@ def main() -> None:
     )
 
     # ------------------------------------------------ load candles
-    df = load_binance(args.symbol, args.start, args.end, "1m")
+    df = load_binance(args.symbol, args.start, args.end, "1s")
     if df.empty:
         sys.exit("No candles returned – check date range.")
 
@@ -93,6 +96,7 @@ def main() -> None:
         storage=args.storage,
         use_sig=args.use_sig,
         reopen_sec=args.reopen_sec,
+        long_only=bool(args.long_only),
     )
 
     def _pick(study):
@@ -112,16 +116,16 @@ def main() -> None:
     )
 
     def_m, def_png, item_def = run_set(
-        default_p, df, "default", args.symbol, args.use_sig, args.reopen_sec
+        default_p, df, "default", args.symbol, args.use_sig, args.reopen_sec, bool(args.long_only)
     )
     best_m, best_png, item_best = run_set(
-        best_p, df, "best", args.symbol, args.use_sig, args.reopen_sec
+        best_p, df, "best", args.symbol, args.use_sig, args.reopen_sec, bool(args.long_only)
     )
     safe_m, safe_png, item_safe = run_set(
-        safe_p, df, "safe", args.symbol, args.use_sig, args.reopen_sec
+        safe_p, df, "safe", args.symbol, args.use_sig, args.reopen_sec, bool(args.long_only)
     )
     fast_m, fast_png, item_fast = run_set(
-        fast_p, df, "fast", args.symbol, args.use_sig, args.reopen_sec
+        fast_p, df, "fast", args.symbol, args.use_sig, args.reopen_sec, bool(args.long_only)
     )
 
     # ------------------------------------------------ triple comparison panel
