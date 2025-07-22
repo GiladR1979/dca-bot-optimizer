@@ -113,7 +113,7 @@ def main() -> None:
     )
 
     # ------------------------------------------------ load candles
-    df = load_binance(args.symbol, args.start, args.end, "1s")
+    df = load_binance(args.symbol, args.start, args.end, "1m")
     if df.empty:
         sys.exit("No candles returned – check date range.")
     df = df.sort_index()  # Ensure sorted by time
