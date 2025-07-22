@@ -55,6 +55,7 @@ def _evaluate(
         use_sig=use_sig,
         reopen_sec=reopen_sec,
         long_only=long_only,
+        slippage_pct=0.001,  # Added for realism
     )
     deals, eq = bot.backtest(df)
     return calc_metrics(deals, eq)
@@ -136,7 +137,7 @@ def _new_study(base_name: str, direction: str, storage: Optional[str], symbol: s
     """Create (or reopen) an Optuna study whose name is unique per symbol."""
 
     full_name = f"{base_name}_{symbol}"
-    sampler = optuna.samplers.RandomSampler(seed=42)  # no duplicates
+    sampler = optuna.samplers.TPESampler(seed=42)  # no duplicates
     # Disable early‑stopping of “bad” trials for now
     #pruner = optuna.pruners.MedianPruner(n_startup_trials=10)
     pruner = optuna.pruners.NopPruner()

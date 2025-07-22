@@ -1,4 +1,3 @@
-
 """
 Numba‑accelerated dual‑side DCA strategy (spot).
 """
@@ -40,6 +39,7 @@ class DCAJITStrategy:
     use_sig: int = 1  # compatibility placeholder
     reopen_sec: int = -1
     long_only: bool = False
+    slippage_pct: float = 0.001  # New: 0.1% slippage
 
     def backtest(self, df: pd.DataFrame) -> Tuple[List[Tuple], List[Tuple]]:
         px = df['close'].to_numpy(np.float64)
@@ -53,7 +53,8 @@ class DCAJITStrategy:
             self.fee_rate, self.initial_balance,
             self.reopen_sec,
             int(self.compound), self.risk_pct,
-            int(self.long_only)
+            int(self.long_only),
+            self.slippage_pct  # Pass new param
         )
 
         deals = [(int(r[0]), int(r[1]), float(r[2]), float(r[3])) for r in deals_np]
@@ -69,7 +70,8 @@ def _loop(
     max_safety: int, base_order: float, mult: float,
     fee_rate: float, init_cash: float,
     reopen_sec: int, compound_int: int, risk_pct: float,
-    long_only_int: int
+    long_only_int: int,
+    slippage_pct: float  # New param
 ):
     n = len(px)
     deals = NbList.empty_list(nb.float64[:])
@@ -110,18 +112,23 @@ def _loop(
 
             side = 1 if open_long else -1
             usd = cash * risk_pct if compound_int == 1 else base_order
-            fee = usd * fee_rate
-            qty_change = side * usd / p
+            if side == 1:  # Buy for long
+                effective_p = p * (1 + slippage_pct)
+                qty_change = usd / effective_p
+                fee = usd * fee_rate
+                cash -= usd + fee
+            else:  # Sell for short
+                effective_p = p * (1 - slippage_pct)
+                qty_sold = usd / p
+                cash_received = qty_sold * effective_p
+                fee = cash_received * fee_rate
+                qty_change = -qty_sold
+                cash += cash_received - fee
 
             cash_start = cash
 
-            if side == 1:
-                cash -= usd + fee
-            else:
-                cash += usd - fee
-
             qty += qty_change
-            avg = p
+            avg = p  # Avg based on original p for TP calc
             ladder0 = usd
             safety_cnt = 0
             next_order = p * (1 - spacing_pct / 100) if side == 1 else p * (1 + spacing_pct / 100)
@@ -135,17 +142,22 @@ def _loop(
         if in_trade and need_safety and safety_cnt < max_safety:
             safety_cnt += 1
             usd = ladder0 * (mult ** safety_cnt)
-            fee = usd * fee_rate
-            qty_change = side * usd / p
-
-            if side == 1:
+            if side == 1:  # Buy safety for long
+                effective_p = p * (1 + slippage_pct)
+                qty_change = usd / effective_p
+                fee = usd * fee_rate
                 cash -= usd + fee
-            else:
-                cash += usd - fee
+            else:  # Sell safety for short
+                effective_p = p * (1 - slippage_pct)
+                qty_sold = usd / p
+                cash_received = qty_sold * effective_p
+                fee = cash_received * fee_rate
+                qty_change = -qty_sold
+                cash += cash_received - fee
 
             qty_old = qty
             qty += qty_change
-            avg = (avg * abs(qty_old) + p * abs(qty_change)) / abs(qty)
+            avg = (avg * abs(qty_old) + p * abs(qty_change)) / abs(qty)  # Use original p for avg
             next_order = p * (1 - spacing_pct / 100) if side == 1 else p * (1 + spacing_pct / 100)
             trail_ext = p
 
@@ -175,12 +187,14 @@ def _loop(
 
         # ------------- close -------------
         if exit_now:
-            if side == 1:
-                proceeds = abs(qty) * p
+            if side == 1:  # Sell to close long
+                effective_p = p * (1 - slippage_pct)
+                proceeds = abs(qty) * effective_p
                 fee = proceeds * fee_rate
                 cash += proceeds - fee
-            else:
-                buy_cost = abs(qty) * p
+            else:  # Buy to close short
+                effective_p = p * (1 + slippage_pct)
+                buy_cost = abs(qty) * effective_p
                 fee = buy_cost * fee_rate
                 cash -= buy_cost + fee
 

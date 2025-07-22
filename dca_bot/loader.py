@@ -26,7 +26,7 @@ from requests.adapters import HTTPAdapter, Retry
 def _klines(symbol: str,
             start_ms: int,
             end_ms: int,
-            interval: str = "1s",
+            interval: str = "1m",
             callback=None):
     """
     Fetch up to 1000 klines in one call with automatic retries and
@@ -105,7 +105,7 @@ def _cache_path(symbol, interval):
     return os.path.join(DATA_DIR, fname)
 
 
-def load_binance(symbol, start, end, interval="1s", callback=None):
+def load_binance(symbol, start, end, interval="1m", callback=None):
     """
     Return a DataFrame of candles for [start, end] (inclusive),
     downloading only what isn't cached yet.

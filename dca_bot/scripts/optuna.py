@@ -16,6 +16,9 @@ import logging
 import os
 import sys
 from typing import Dict, Tuple
+import numpy as np
+from dateutil.relativedelta import relativedelta
+import pandas as pd
 
 from ..loader import load_binance
 from ..optuna_search import run_three_studies
@@ -38,7 +41,7 @@ def run_set(
     long_only: bool = False,
 ) -> Tuple[Dict, str, Tuple]:
     """Back-test one parameter set and return (metrics, PNG path, panel item)."""
-    bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only)
+    bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, slippage_pct=0.001)
     deals, eq = bot.backtest(df)
     met = calc_metrics(deals, eq)
 
@@ -46,6 +49,35 @@ def run_set(
     equity_curve(eq, deals, label, png)
 
     return met, png, (eq, deals, label)
+
+def monte_carlo_backtest(
+    df: pd.DataFrame,
+    params: Dict,
+    use_sig: int,
+    reopen_sec: int,
+    long_only: bool = False,
+    num_sims: int = 100,
+    noise_std: float = 0.001,  # 0.1% std dev noise
+) -> Dict:
+    """Run Monte Carlo simulations with price perturbations."""
+    all_met = []
+    for _ in range(num_sims):
+        df_pert = df.copy()
+        # Multiplicative noise for realistic volatility simulation
+        df_pert['close'] *= (1 + np.random.normal(0, noise_std, len(df_pert)))
+        bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, slippage_pct=0.001)
+        deals, eq = bot.backtest(df_pert)
+        met = calc_metrics(deals, eq)
+        all_met.append(met)
+
+    # Aggregate key metrics
+    agg = {
+        'avg_apy_pct': np.mean([m['apy_pct'] for m in all_met]),
+        'std_apy_pct': np.std([m['apy_pct'] for m in all_met]),
+        'worst_drawdown_pct': np.max([m['max_drawdown_pct'] for m in all_met]),
+        'avg_deals': np.mean([m['deals'] for m in all_met]),
+    }
+    return agg
 
 # -------------------------------------------------------------------- main CLI
 def main() -> None:
@@ -83,68 +115,88 @@ def main() -> None:
     )
 
     # ------------------------------------------------ load candles
-    df = load_binance(args.symbol, args.start, args.end, "1s")
+    df = load_binance(args.symbol, args.start, args.end, "1m")
     if df.empty:
         sys.exit("No candles returned – check date range.")
+    df = df.sort_index()  # Ensure sorted by time
 
-    # ------------------------------------------------ run three studies
-    best_st, safe_st, fast_st = run_three_studies(
-        df,
-        symbol=args.symbol,
-        n_trials_each=args.trials,
-        n_jobs=(os.cpu_count() if args.jobs == 0 else args.jobs),
-        storage=args.storage,
-        use_sig=args.use_sig,
-        reopen_sec=args.reopen_sec,
-        long_only=bool(args.long_only),
-    )
+    # ------------------------------------------------ Walk-Forward Optimization
+    window_results = []
+    overall_summary = {'best': [], 'safe': [], 'fast': []}
+    current_start = df.index.min()
+    while current_start + relativedelta(months=12) <= df.index.max():
+        end_win = current_start + relativedelta(months=12)
+        delta = end_win - current_start
+        train_days = int(0.7 * delta.days)
+        train_end = current_start + pd.Timedelta(days=train_days)
+        train_df = df.loc[current_start:train_end]
+        test_df = df.loc[train_end + pd.Timedelta(seconds=1):end_win]  # Out-of-sample
 
-    def _pick(study):
-        t = study.best_trial
-        return t.user_attrs["params"], t.user_attrs["metrics"]
+        logging.info(f"Processing window: {current_start} to {end_win} (train: {current_start} to {train_end}, test: {train_end} to {end_win})")
 
-    best_p, _ = _pick(best_st)
-    safe_p, _ = _pick(safe_st)
-    fast_p, _ = _pick(fast_st)
+        # Run optimization on train
+        best_st, safe_st, fast_st = run_three_studies(
+            train_df,
+            symbol=args.symbol,
+            n_trials_each=args.trials,
+            n_jobs=(os.cpu_count() if args.jobs == 0 else args.jobs),
+            storage=args.storage,
+            use_sig=args.use_sig,
+            reopen_sec=args.reopen_sec,
+            long_only=bool(args.long_only),
+        )
 
-    # ------------------------------------------------ baseline default
+        def _pick(study):
+            t = study.best_trial
+            return t.user_attrs["params"], t.user_attrs["metrics"]
+
+        best_p, _ = _pick(best_st)
+        safe_p, _ = _pick(safe_st)
+        fast_p, _ = _pick(fast_st)
+
+        # Validate with Monte Carlo on testF
+        best_mc = monte_carlo_backtest(test_df, best_p, args.use_sig, args.reopen_sec, bool(args.long_only))
+        safe_mc = monte_carlo_backtest(test_df, safe_p, args.use_sig, args.reopen_sec, bool(args.long_only))
+        fast_mc = monte_carlo_backtest(test_df, fast_p, args.use_sig, args.reopen_sec, bool(args.long_only))
+
+        window_summary = {
+            'window_start': str(current_start),
+            'window_end': str(end_win),
+            'best': {'params': best_p, 'mc_metrics': best_mc},
+            'safe': {'params': safe_p, 'mc_metrics': safe_mc},
+            'fast': {'params': fast_p, 'mc_metrics': fast_mc},
+        }
+        window_results.append(window_summary)
+
+        # Aggregate for overall
+        overall_summary['best'].append(best_mc['avg_apy_pct'])
+        overall_summary['safe'].append(safe_mc['avg_apy_pct'])
+        overall_summary['fast'].append(fast_mc['avg_apy_pct'])
+
+        current_start += relativedelta(months=6)
+
+    # ------------------------------------------------ Overall aggregates
+    overall = {
+        'avg_best_apy': np.mean(overall_summary['best']),
+        'avg_safe_apy': np.mean(overall_summary['safe']),
+        'avg_fast_apy': np.mean(overall_summary['fast']),
+        'windows': window_results,
+    }
+
+    print(json.dumps(overall, indent=2))
+    with open(os.path.join(RES, f"{args.symbol}_wfo_summary.json"),
+              "w", encoding="utf-8") as f:
+        json.dump(overall, f, indent=2)
+
+    # ------------------------------------------------ baseline default (full data for comparison)
     default_p = dict(
         spacing_pct=1,
         tp_pct=0.6,
         trailing=True,
         trailing_pct=0.1,
     )
-
-    def_m, def_png, item_def = run_set(
-        default_p, df, "default", args.symbol, args.use_sig, args.reopen_sec, bool(args.long_only)
-    )
-    best_m, best_png, item_best = run_set(
-        best_p, df, "best", args.symbol, args.use_sig, args.reopen_sec, bool(args.long_only)
-    )
-    safe_m, safe_png, item_safe = run_set(
-        safe_p, df, "safe", args.symbol, args.use_sig, args.reopen_sec, bool(args.long_only)
-    )
-    fast_m, fast_png, item_fast = run_set(
-        fast_p, df, "fast", args.symbol, args.use_sig, args.reopen_sec, bool(args.long_only)
-    )
-
-    # ------------------------------------------------ triple comparison panel
-    tri_png = os.path.join(RES, f"{args.symbol}_triple.png")
-    panel([item_best, item_safe, item_fast], tri_png)
-
-    # ------------------------------------------------ summary file
-    summary = {
-        "default": {"params": default_p, "metrics": def_m, "png": def_png},
-        "best":    {"params": best_p,    "metrics": best_m, "png": best_png},
-        "safe":    {"params": safe_p,    "metrics": safe_m, "png": safe_png},
-        "fast":    {"params": fast_p,    "metrics": fast_m, "png": fast_png},
-        "panel": tri_png,
-    }
-
-    print(json.dumps(summary, indent=2))
-    with open(os.path.join(RES, f"{args.symbol}_opt_summary.json"),
-              "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
+    default_mc = monte_carlo_backtest(df, default_p, args.use_sig, args.reopen_sec, bool(args.long_only))
+    print(f"Default MC on full data: {json.dumps(default_mc, indent=2)}")
 
 
 if __name__ == "__main__":
