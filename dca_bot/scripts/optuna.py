@@ -175,6 +175,38 @@ def main() -> None:
         'windows': window_results,
     }
 
+    # ------------------------------------------------ Compute optimal overall parameters
+    if window_results:
+        spacings = [w['best']['params']['spacing_pct'] for w in window_results]
+        tps = [w['best']['params']['tp_pct'] for w in window_results]
+        trailings = [w['best']['params']['trailing'] for w in window_results]
+
+        avg_spacing = np.mean(spacings)
+        avg_tp = np.mean(tps)
+        majority_trailing = np.sum(trailings) > len(trailings) / 2  # True if >50%
+
+        # Round to nearest 0.1 (matching search step)
+        rounded_spacing = round(avg_spacing / 0.1) * 0.1
+        rounded_tp = round(avg_tp / 0.1) * 0.1
+
+        optimal_params = {
+            'spacing_pct': rounded_spacing,
+            'tp_pct': rounded_tp,
+            'trailing': majority_trailing,
+            'trailing_pct': 0.1  # Fixed
+        }
+        print(f"Optimal overall parameters: {json.dumps(optimal_params, indent=2)}")
+
+        # Generate and save "best" graph with optimal params on full data
+        _, optimal_png, _ = run_set(
+            optimal_params, df, "optimal", args.symbol, args.use_sig, args.reopen_sec, bool(args.long_only)
+        )
+
+        overall['optimal_params'] = optimal_params
+        overall['optimal_png'] = optimal_png
+    else:
+        print("No windows processed – cannot compute optimal parameters.")
+
     print(json.dumps(overall, indent=2))
     with open(os.path.join(RES, f"{args.symbol}_wfo_summary.json"),
               "w", encoding="utf-8") as f:
