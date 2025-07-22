@@ -133,10 +133,12 @@ def _register_trials(study: optuna.study.Study):
 #  create / run a study                                              #
 # ------------------------------------------------------------------ #
 
-def _new_study(base_name: str, direction: str, storage: Optional[str], symbol: str):
-    """Create (or reopen) an Optuna study whose name is unique per symbol."""
+def _new_study(base_name: str, direction: str, storage: Optional[str], symbol: str, window_id: str = ""):
+    """Create (or reopen) an Optuna study whose name is unique per symbol and window."""
 
     full_name = f"{base_name}_{symbol}"
+    if window_id:
+        full_name += f"_{window_id}"
     sampler = optuna.samplers.TPESampler(seed=42)  # no duplicates
     # Disable early‑stopping of “bad” trials for now
     #pruner = optuna.pruners.MedianPruner(n_startup_trials=10)
@@ -207,7 +209,7 @@ def seed_from(source: optuna.study.Study, dest: optuna.study.Study, metric_key: 
 #  high‑level helper                                                 #
 # ------------------------------------------------------------------ #
 
-def run_three_studies(
+def run_best_study(
     df: pd.DataFrame,
     symbol: str,
     n_trials_each: int,
@@ -216,11 +218,12 @@ def run_three_studies(
     use_sig: int = 1,
     reopen_sec: int = 60,
     long_only: bool = False,
+    window_id: str = "",
 ):
-    """Run BEST, SAFE and FAST Optuna studies for *symbol*."""
+    """Run BEST Optuna study for *symbol*."""
 
     # ---------- BEST (annual %) --------------------------------------
-    study_best = _new_study("dca_best", "maximize", storage, symbol)
+    study_best = _new_study("dca_best", "maximize", storage, symbol, window_id)
     study_best.optimize(
         make_objective(df, "annual_pct", use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only),
         n_trials=n_trials_each,
@@ -228,24 +231,4 @@ def run_three_studies(
         show_progress_bar=True,
     )
 
-    # ---------- SAFE (min DD) ---------------------------------------
-    study_safe = _new_study("dca_safe", "minimize", storage, symbol)
-    seed_from(study_best, study_safe, "max_drawdown_pct")
-    study_safe.optimize(
-        make_objective(df, "max_drawdown_pct", use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only),
-        n_trials=n_trials_each,
-        n_jobs=n_jobs,
-        show_progress_bar=True,
-    )
-
-    # ---------- FAST (max number of deals) --------------------------
-    study_fast = _new_study("dca_fast", "maximize", storage, symbol)
-    seed_from(study_best, study_fast, "deals")          # copy existing trials
-    study_fast.optimize(
-        make_objective(df, "deals", use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only),                    # optimise the “deals” metric
-        n_trials=n_trials_each,
-        n_jobs=n_jobs,
-        show_progress_bar=True,
-    )
-
-    return study_best, study_safe, study_fast
+    return study_best

@@ -21,7 +21,7 @@ from dateutil.relativedelta import relativedelta
 import pandas as pd
 
 from ..loader import load_binance
-from ..optuna_search import run_three_studies
+from ..optuna_search import run_best_study
 from ..strategies.dca_ts_numba import DCAJITStrategy as DCATrailingStrategy
 from ..simulator import calc_metrics
 from ..plotting import equity_curve, panel
@@ -122,7 +122,7 @@ def main() -> None:
 
     # ------------------------------------------------ Walk-Forward Optimization
     window_results = []
-    overall_summary = {'best': [], 'safe': [], 'fast': []}
+    overall_summary = {'best': []}
     current_start = df.index.min()
     while current_start + relativedelta(months=12) <= df.index.max():
         end_win = current_start + relativedelta(months=12)
@@ -132,10 +132,11 @@ def main() -> None:
         train_df = df.loc[current_start:train_end]
         test_df = df.loc[train_end + pd.Timedelta(seconds=1):end_win]  # Out-of-sample
 
+        window_id = current_start.strftime('%Y-%m-%d')
         logging.info(f"Processing window: {current_start} to {end_win} (train: {current_start} to {train_end}, test: {train_end} to {end_win})")
 
         # Run optimization on train
-        best_st, safe_st, fast_st = run_three_studies(
+        best_st = run_best_study(
             train_df,
             symbol=args.symbol,
             n_trials_each=args.trials,
@@ -144,6 +145,7 @@ def main() -> None:
             use_sig=args.use_sig,
             reopen_sec=args.reopen_sec,
             long_only=bool(args.long_only),
+            window_id=window_id,
         )
 
         def _pick(study):
@@ -151,35 +153,25 @@ def main() -> None:
             return t.user_attrs["params"], t.user_attrs["metrics"]
 
         best_p, _ = _pick(best_st)
-        safe_p, _ = _pick(safe_st)
-        fast_p, _ = _pick(fast_st)
 
-        # Validate with Monte Carlo on testF
+        # Validate with Monte Carlo on test
         best_mc = monte_carlo_backtest(test_df, best_p, args.use_sig, args.reopen_sec, bool(args.long_only))
-        safe_mc = monte_carlo_backtest(test_df, safe_p, args.use_sig, args.reopen_sec, bool(args.long_only))
-        fast_mc = monte_carlo_backtest(test_df, fast_p, args.use_sig, args.reopen_sec, bool(args.long_only))
 
         window_summary = {
             'window_start': str(current_start),
             'window_end': str(end_win),
             'best': {'params': best_p, 'mc_metrics': best_mc},
-            'safe': {'params': safe_p, 'mc_metrics': safe_mc},
-            'fast': {'params': fast_p, 'mc_metrics': fast_mc},
         }
         window_results.append(window_summary)
 
         # Aggregate for overall
         overall_summary['best'].append(best_mc['avg_apy_pct'])
-        overall_summary['safe'].append(safe_mc['avg_apy_pct'])
-        overall_summary['fast'].append(fast_mc['avg_apy_pct'])
 
         current_start += relativedelta(months=6)
 
     # ------------------------------------------------ Overall aggregates
     overall = {
         'avg_best_apy': np.mean(overall_summary['best']),
-        'avg_safe_apy': np.mean(overall_summary['safe']),
-        'avg_fast_apy': np.mean(overall_summary['fast']),
         'windows': window_results,
     }
 
