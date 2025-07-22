@@ -1,12 +1,10 @@
 """
-CLI – runs BEST, SAFE and FAST Optuna studies in one shot, then
-re-tests the winning parameter sets.
+CLI – runs BEST Optuna study, computes optimal parameters, and generates a graph.
 
 New flags
 ---------
 --use-sig    1 (default) = wait for Bollinger+RSI trigger
              0           = ignore trigger
-
 --reopen-sec N   Seconds to wait after a deal closes when --use-sig is 0
 """
 
@@ -24,7 +22,7 @@ from ..loader import load_binance
 from ..optuna_search import run_best_study
 from ..strategies.dca_ts_numba import DCAJITStrategy as DCATrailingStrategy
 from ..simulator import calc_metrics
-from ..plotting import equity_curve, panel
+from ..plotting import equity_curve
 
 # -------------------------------------------------------------------- constants
 RES = os.path.join(os.path.dirname(__file__), "..", "..", "results")
@@ -72,22 +70,22 @@ def monte_carlo_backtest(
 
     # Aggregate key metrics
     agg = {
-        'avg_apy_pct': np.mean([m['apy_pct'] for m in all_met]),
-        'std_apy_pct': np.std([m['apy_pct'] for m in all_met]),
-        'worst_drawdown_pct': np.max([m['max_drawdown_pct'] for m in all_met]),
-        'avg_deals': np.mean([m['deals'] for m in all_met]),
+        'avg_apy_pct': float(np.mean([m['apy_pct'] for m in all_met])),
+        'std_apy_pct': float(np.std([m['apy_pct'] for m in all_met])),
+        'worst_drawdown_pct': float(np.max([m['max_drawdown_pct'] for m in all_met])),
+        'avg_deals': float(np.mean([m['deals'] for m in all_met])),
     }
     return agg
 
 # -------------------------------------------------------------------- main CLI
 def main() -> None:
-    pa = argparse.ArgumentParser(description="Three-objective optimiser")
+    pa = argparse.ArgumentParser(description="Best-objective optimiser")
     pa.add_argument("symbol")
     pa.add_argument("start")
     pa.add_argument("end")
 
     pa.add_argument("--trials", type=int, default=200,
-                    help="number of trials for *each* study")
+                    help="number of trials for the study")
     pa.add_argument("--jobs", type=int, default=0,
                     help="0 = all CPU cores")
     pa.add_argument("--storage", default="sqlite:///dca.sqlite",
@@ -115,7 +113,7 @@ def main() -> None:
     )
 
     # ------------------------------------------------ load candles
-    df = load_binance(args.symbol, args.start, args.end, "1m")
+    df = load_binance(args.symbol, args.start, args.end, "1s")
     if df.empty:
         sys.exit("No candles returned – check date range.")
     df = df.sort_index()  # Ensure sorted by time
@@ -171,7 +169,7 @@ def main() -> None:
 
     # ------------------------------------------------ Overall aggregates
     overall = {
-        'avg_best_apy': np.mean(overall_summary['best']),
+        'avg_best_apy': float(np.mean(overall_summary['best'])),
         'windows': window_results,
     }
 
@@ -183,7 +181,7 @@ def main() -> None:
 
         avg_spacing = np.mean(spacings)
         avg_tp = np.mean(tps)
-        majority_trailing = np.sum(trailings) > len(trailings) / 2  # True if >50%
+        majority_trailing = bool(np.sum(trailings) > len(trailings) / 2)  # Explicitly cast to Python bool
 
         # Round to nearest 0.1 (matching search step)
         rounded_spacing = round(avg_spacing / 0.1) * 0.1
@@ -198,12 +196,13 @@ def main() -> None:
         print(f"Optimal overall parameters: {json.dumps(optimal_params, indent=2)}")
 
         # Generate and save "best" graph with optimal params on full data
-        _, optimal_png, _ = run_set(
+        optimal_mc, optimal_png, _ = run_set(
             optimal_params, df, "optimal", args.symbol, args.use_sig, args.reopen_sec, bool(args.long_only)
         )
 
         overall['optimal_params'] = optimal_params
         overall['optimal_png'] = optimal_png
+        overall['optimal_mc_metrics'] = monte_carlo_backtest(df, optimal_params, args.use_sig, args.reopen_sec, bool(args.long_only))
     else:
         print("No windows processed – cannot compute optimal parameters.")
 
