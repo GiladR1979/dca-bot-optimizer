@@ -95,6 +95,8 @@ def main() -> None:
                     help="'none' for in-memory Optuna studies")
     pa.add_argument("--window-months", type=int, default=12,
                     help="Size of each walk-forward window in months (e.g., 6 for half-year slices)")
+    pa.add_argument("--full-dataset", action="store_true",
+                    help="Disable walk-forward windows and optimize on the full dataset instead (default: False, windows enabled)")
 
     # NEW flags -------------------------------------------------------
     pa.add_argument("--use-sig", type=int, choices=[0, 1], default=1,
@@ -130,26 +132,11 @@ def main() -> None:
     # Define exit_on_flip based on flag (1 = no flip exit = False)
     exit_on_flip = args.no_flip_exit == 0
 
-    # ------------------------------------------------ Walk-Forward Optimization
-    window_results = []
-    overall_summary = {'best': []}
-    current_start = df.index.min()
-    window_size = args.window_months
-    slide_months = window_size // 2  # Slide by half the window size for overlap
-    while current_start + relativedelta(months=window_size) <= df.index.max():
-        end_win = current_start + relativedelta(months=window_size)
-        delta = end_win - current_start
-        train_days = int(0.7 * delta.days)
-        train_end = current_start + pd.Timedelta(days=train_days)
-        train_df = df.loc[current_start:train_end]
-        test_df = df.loc[train_end + pd.Timedelta(seconds=1):end_win]  # Out-of-sample
-
-        window_id = current_start.strftime('%Y-%m-%d')
-        logging.info(f"Processing window: {current_start} to {end_win} (train: {current_start} to {train_end}, test: {train_end} to {end_win})")
-
-        # Run optimization on train
+    if args.full_dataset:
+        # ------------------------------------------------ Full dataset optimization (no windows)
+        logging.info(f"Optimizing on full dataset: {df.index.min()} to {df.index.max()}")
         best_st = run_best_study(
-            train_df,
+            df,
             symbol=args.symbol,
             n_trials=args.trials,
             n_jobs=(os.cpu_count() if args.jobs == 0 else args.jobs),
@@ -158,7 +145,7 @@ def main() -> None:
             reopen_sec=args.reopen_sec,
             long_only=bool(args.long_only),
             exit_on_flip=exit_on_flip,
-            window_id=window_id,
+            window_id="",  # No window ID for full
         )
 
         def _pick(study):
@@ -167,20 +154,67 @@ def main() -> None:
 
         best_p, _ = _pick(best_st)
 
-        # Validate with Monte Carlo on test
-        best_mc = monte_carlo_backtest(test_df, best_p, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip)
+        # MC on full (no split)
+        best_mc = monte_carlo_backtest(df, best_p, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip)
 
-        window_summary = {
-            'window_start': str(current_start),
-            'window_end': str(end_win),
+        window_results = [{
+            'window_start': str(df.index.min()),
+            'window_end': str(df.index.max()),
             'best': {'params': best_p, 'mc_metrics': best_mc},
-        }
-        window_results.append(window_summary)
+        }]
+        overall_summary = {'best': [best_mc['avg_apy_pct']]}
+    else:
+        # ------------------------------------------------ Walk-Forward Optimization
+        window_results = []
+        overall_summary = {'best': []}
+        current_start = df.index.min()
+        window_size = args.window_months
+        slide_months = window_size // 2  # Slide by half the window size for overlap
+        while current_start + relativedelta(months=window_size) <= df.index.max():
+            end_win = current_start + relativedelta(months=window_size)
+            delta = end_win - current_start
+            train_days = int(0.7 * delta.days)
+            train_end = current_start + pd.Timedelta(days=train_days)
+            train_df = df.loc[current_start:train_end]
+            test_df = df.loc[train_end + pd.Timedelta(seconds=1):end_win]  # Out-of-sample
 
-        # Aggregate for overall
-        overall_summary['best'].append(best_mc['avg_apy_pct'])
+            window_id = current_start.strftime('%Y-%m-%d')
+            logging.info(f"Processing window: {current_start} to {end_win} (train: {current_start} to {train_end}, test: {train_end} to {end_win})")
 
-        current_start += relativedelta(months=slide_months)
+            # Run optimization on train
+            best_st = run_best_study(
+                train_df,
+                symbol=args.symbol,
+                n_trials=args.trials,
+                n_jobs=(os.cpu_count() if args.jobs == 0 else args.jobs),
+                storage=args.storage,
+                use_sig=args.use_sig,
+                reopen_sec=args.reopen_sec,
+                long_only=bool(args.long_only),
+                exit_on_flip=exit_on_flip,
+                window_id=window_id,
+            )
+
+            def _pick(study):
+                t = study.best_trial
+                return t.user_attrs["params"], t.user_attrs["metrics"]
+
+            best_p, _ = _pick(best_st)
+
+            # Validate with Monte Carlo on test
+            best_mc = monte_carlo_backtest(test_df, best_p, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip)
+
+            window_summary = {
+                'window_start': str(current_start),
+                'window_end': str(end_win),
+                'best': {'params': best_p, 'mc_metrics': best_mc},
+            }
+            window_results.append(window_summary)
+
+            # Aggregate for overall
+            overall_summary['best'].append(best_mc['avg_apy_pct'])
+
+            current_start += relativedelta(months=slide_months)
 
     # ------------------------------------------------ Overall aggregates
     overall = {
