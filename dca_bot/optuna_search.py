@@ -1,5 +1,5 @@
 """
-Full‑engine Optuna optimiser – *study names are now per‑symbol*.
+Full‑engine Optuna optimiser – *study names are per‑symbol*.
 
 This prevents cross‑contamination when you optimise multiple coins into the
 same SQLite file.  The only change is that each study name gets the `symbol`
@@ -75,10 +75,10 @@ def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reop
 
     # ------------------------------------------------------------------ #
     def _objective(trial: optuna.Trial):
-        spacing = trial.suggest_float("spacing_pct", 0.3, 2.0, step=0.1)
+        spacing = 0.3
         tp = trial.suggest_float("tp_pct", 0.5, 3.0, step=0.1)
         trailing = trial.suggest_categorical("trailing", [True, False])
-        trail_pct = trial.suggest_float("trailing_pct", 0.1, 0.1, step=0.1)
+        trail_pct = 0.1
 
         # ---- skip exact‑duplicate parameter sets --------------------
         sig = _param_sig(spacing, tp, trailing, trail_pct)

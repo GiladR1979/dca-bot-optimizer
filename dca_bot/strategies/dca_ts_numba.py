@@ -11,65 +11,50 @@ import pandas_ta as pta
 from numba.typed import List as NbList
 
 
-def _entry_signal(df: pd.DataFrame) -> np.ndarray:
-    """Compute Supertrend on 5m and 30m, return bull only if both align."""
-    # 5m Supertrend
+def _bb_percent(df: pd.DataFrame) -> np.ndarray:
     ohlc_5m = df.resample("5min").agg(
         high=("high", "max"),
         low=("low", "min"),
         close=("close", "last"),
     ).dropna()
-    st_5m = pta.supertrend(ohlc_5m['high'], ohlc_5m['low'], ohlc_5m['close'], length=10, multiplier=3)
-    dir_col_5m = [c for c in st_5m.columns if c.startswith('SUPERTd')][0]
-    bull_5m = (st_5m[dir_col_5m] == 1).astype(np.uint8).reindex(df.index, method='ffill').fillna(0)
-
-    # 30m Supertrend (longer timeframe)
-    ohlc_30m = df.resample("30min").agg(
-        high=("high", "max"),
-        low=("low", "min"),
-        close=("close", "last"),
-    ).dropna()
-    st_30m = pta.supertrend(ohlc_30m['high'], ohlc_30m['low'], ohlc_30m['close'], length=10, multiplier=3)
-    dir_col_30m = [c for c in st_30m.columns if c.startswith('SUPERTd')][0]
-    bull_30m = (st_30m[dir_col_30m] == 1).astype(np.uint8).reindex(df.index, method='ffill').fillna(0)
-
-    # Align: bull if both 5m and 30m are bull; bear if both not bull
-    aligned_bull = (bull_5m & bull_30m).to_numpy(np.uint8)
-    return aligned_bull
+    bb = pta.bbands(ohlc_5m['close'], length=20, std=2)
+    dir_col = [c for c in bb.columns if c.startswith('BBP_')][0]
+    bb_per = bb[dir_col].reindex(df.index, method='ffill').fillna(0.5)
+    return bb_per.to_numpy(np.float64)
 
 
 @dataclass
 class DCAJITStrategy:
     base_order: float = 16.6078
-    mult: float = 1.0
-    max_safety: int = 50
+    mult: float = 1.5
+    max_safety: int = 8
     fee_rate: float = 0.001
     compound: bool = True
-    risk_pct: float = 0.0166078
-    spacing_pct: float = 1.0
+    risk_pct: float = 0.013085
+    spacing_pct: float = 0.3
     tp_pct: float = 0.6
     trailing: bool = True
     trailing_pct: float = 0.1
     initial_balance: float = 1000.0
     use_sig: int = 1  # compatibility placeholder
     reopen_sec: int = -1
-    long_only: bool = False
-    exit_on_flip: bool = True  # New switch: exit on Supertrend flip
+    long_only: bool = True
+    exit_on_flip: bool = True  # Use BB >=1 as flip for exit
 
     def backtest(self, df: pd.DataFrame) -> Tuple[List[Tuple], List[Tuple]]:
         px = df['close'].to_numpy(np.float64)
         ts = df.index.view('int64') // 1_000_000_000
-        bull = _entry_signal(df)
+        bb_percent = _bb_percent(df)
 
         deals_np, eq_np = _loop(
-            ts, px, bull,
+            ts, px, bb_percent,
             self.spacing_pct, self.tp_pct, int(self.trailing), self.trailing_pct,
             self.max_safety, self.base_order, self.mult,
             self.fee_rate, self.initial_balance,
             self.reopen_sec,
             int(self.compound), self.risk_pct,
             int(self.long_only),
-            int(self.exit_on_flip)  # Pass new param
+            int(self.exit_on_flip)
         )
 
         deals = [(int(r[0]), int(r[1]), float(r[2]), float(r[3])) for r in deals_np]
@@ -80,7 +65,7 @@ class DCAJITStrategy:
 # ------------------ numba core ------------------
 @nb.njit(cache=True)
 def _loop(
-    ts: np.ndarray, px: np.ndarray, bull: np.ndarray,
+    ts: np.ndarray, px: np.ndarray, bb_percent: np.ndarray,
     spacing_pct: float, tp_pct: float, trailing_int: int, trailing_pct: float,
     max_safety: int, base_order: float, mult: float,
     fee_rate: float, init_cash: float,
@@ -111,17 +96,17 @@ def _loop(
         eq = cash + qty * p
         equity.append(np.array((t, eq), dtype=np.float64))
 
-        trend_bull = bull[i] == 1
+        bbp = bb_percent[i]
 
         # ------------- open trade -------------
         if not in_trade:
             if long_only_int == 1:
                 # Long-only mode
-                open_long = trend_bull and (reopen_sec == -1 or t >= last_close + reopen_sec)
+                open_long = (0 <= bbp <= 0.5) and (reopen_sec == -1 or t >= last_close + reopen_sec)
                 open_short = False
             else:
-                open_long = trend_bull and (reopen_sec == -1 or t >= last_close + reopen_sec)
-                open_short = (not trend_bull) and (reopen_sec == -1 or t >= last_close + reopen_sec)
+                open_long = (0 <= bbp <= 0.5) and (reopen_sec == -1 or t >= last_close + reopen_sec)
+                open_short = (bbp > 1) and (reopen_sec == -1 or t >= last_close + reopen_sec)  # Example for short, but not used
             if not (open_long or open_short):
                 continue
 
@@ -148,7 +133,7 @@ def _loop(
             continue
 
         # ------------- safety orders -------------
-        need_safety = (side == 1 and p <= next_order) or (side == -1 and p >= next_order)
+        need_safety = (side == 1 and bbp < 0 and p <= next_order) or (side == -1 and bbp > 1 and p >= next_order)
         if in_trade and need_safety and safety_cnt < max_safety:
             safety_cnt += 1
             usd = ladder0 * (mult ** safety_cnt)
@@ -185,8 +170,8 @@ def _loop(
             else:
                 exit_now = True
 
-        # trend flip on longer timeframe (30m, as it's the resample for bull)
-        trend_flip = (side == 1 and not trend_bull) or (side == -1 and trend_bull)
+        # trend flip using BB
+        trend_flip = (side == 1 and bbp >= 1) or (side == -1 and bbp <= 0)
         if exit_on_flip_int and trend_flip:
             exit_now = True
 

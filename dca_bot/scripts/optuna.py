@@ -101,10 +101,12 @@ def main() -> None:
     pa.add_argument("--reopen-sec", type=int, default=60,
                     help="Delay before reopening when --use-sig 0 "
                          "(default 60 s)")
-    pa.add_argument("--long-only", type=int, choices=[0, 1], default=0,
-                    help="1 = long positions only, 0 = both long and short (default)")
+    pa.add_argument("--long-only", type=int, choices=[0, 1], default=1,
+                    help="1 = long positions only (default), 0 = both long and short")
     pa.add_argument("--no-flip-exit", type=int, choices=[0, 1], default=0,
                     help="1 = disable Supertrend flip exits (exit only on TP/trailing), 0 = keep flip exits (default)")
+    pa.add_argument("--no-graph", action="store_true",
+                    help="Skip generating and saving the equity curve PNG (speeds up execution)")
 
     pa.add_argument("-v", "--verbose", action="store_true")
     args = pa.parse_args()
@@ -151,6 +153,7 @@ def main() -> None:
             use_sig=args.use_sig,
             reopen_sec=args.reopen_sec,
             long_only=bool(args.long_only),
+            exit_on_flip=exit_on_flip,
             window_id=window_id,
         )
 
@@ -183,30 +186,33 @@ def main() -> None:
 
     # ------------------------------------------------ Compute optimal overall parameters
     if window_results:
-        spacings = [w['best']['params']['spacing_pct'] for w in window_results]
         tps = [w['best']['params']['tp_pct'] for w in window_results]
         trailings = [w['best']['params']['trailing'] for w in window_results]
 
-        avg_spacing = np.mean(spacings)
         avg_tp = np.mean(tps)
         majority_trailing = bool(np.sum(trailings) > len(trailings) / 2)  # Explicitly cast to Python bool
 
         # Round to nearest 0.1 (matching search step)
-        rounded_spacing = round(avg_spacing / 0.1) * 0.1
         rounded_tp = round(avg_tp / 0.1) * 0.1
 
         optimal_params = {
-            'spacing_pct': rounded_spacing,
+            'spacing_pct': 0.3,
             'tp_pct': rounded_tp,
             'trailing': majority_trailing,
             'trailing_pct': 0.1  # Fixed
         }
         print(f"Optimal overall parameters: {json.dumps(optimal_params, indent=2)}")
 
-        # Generate and save "best" graph with optimal params on full data
-        optimal_mc, optimal_png, _ = run_set(
-            optimal_params, df, "optimal", args.symbol, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip
-        )
+        # Generate and save "best" graph with optimal params on full data (if not skipped)
+        if not args.no_graph:
+            optimal_met, optimal_png, _ = run_set(
+                optimal_params, df, "optimal", args.symbol, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip
+            )
+        else:
+            bot = DCATrailingStrategy(**optimal_params, use_sig=args.use_sig, reopen_sec=args.reopen_sec, long_only=bool(args.long_only), exit_on_flip=exit_on_flip)
+            deals, eq = bot.backtest(df)
+            optimal_met = calc_metrics(deals, eq)
+            optimal_png = None
 
         overall['optimal_params'] = optimal_params
         overall['optimal_png'] = optimal_png
@@ -221,7 +227,7 @@ def main() -> None:
 
     # ------------------------------------------------ baseline default (full data for comparison)
     default_p = dict(
-        spacing_pct=1,
+        spacing_pct=0.3,
         tp_pct=0.6,
         trailing=True,
         trailing_pct=0.1,
@@ -232,4 +238,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    
