@@ -227,20 +227,28 @@ def main() -> None:
         spacings = [w['best']['params']['spacing_pct'] for w in window_results]
         tps = [w['best']['params']['tp_pct'] for w in window_results]
         trailings = [w['best']['params']['trailing'] for w in window_results]
+        sls = [w['best']['params']['stop_loss_pct'] for w in window_results]  # New
+        max_holds = [w['best']['params']['max_hold_days'] for w in window_results]  # New
 
         avg_spacing = np.mean(spacings)
         avg_tp = np.mean(tps)
+        avg_sl = np.mean(sls)  # New
+        avg_max_hold = np.mean(max_holds)  # New
         majority_trailing = bool(np.sum(trailings) > len(trailings) / 2)  # Explicitly cast to Python bool
 
         # Round to nearest 0.1 (matching search step)
         rounded_spacing = round(avg_spacing / 0.1) * 0.1
         rounded_tp = round(avg_tp / 0.1) * 0.1
+        rounded_sl = round(avg_sl / 1.0) * 1.0  # Round to nearest 1% for SL
+        rounded_max_hold = round(avg_max_hold / 10) * 10  # Round to nearest 10 days
 
         optimal_params = {
             'spacing_pct': rounded_spacing,
             'tp_pct': rounded_tp,
             'trailing': majority_trailing,
-            'trailing_pct': 0.1  # Fixed
+            'trailing_pct': 0.1,  # Fixed
+            'stop_loss_pct': rounded_sl,  # New
+            'max_hold_days': rounded_max_hold,  # New
         }
         print(f"Optimal overall parameters: {json.dumps(optimal_params, indent=2)}")
 
@@ -272,6 +280,8 @@ def main() -> None:
         tp_pct=0.6,
         trailing=True,
         trailing_pct=0.1,
+        stop_loss_pct=20.0,  # Add default SL
+        max_hold_days=30,  # Add default max hold
     )
     default_mc = monte_carlo_backtest(df, default_p, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip)
     print(f"Default MC on full data: {json.dumps(default_mc, indent=2)}")

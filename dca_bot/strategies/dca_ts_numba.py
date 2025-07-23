@@ -40,6 +40,8 @@ class DCAJITStrategy:
     reopen_sec: int = -1
     long_only: bool = True
     exit_on_flip: bool = True  # Use BB >=1 as flip for exit
+    max_hold_days: int = 30  # New: Max days to hold a deal before forced exit
+    stop_loss_pct: float = 20.0  # New: % below initial base price to SL exit (e.g., 20 = -20% from base)
 
     def backtest(self, df: pd.DataFrame) -> Tuple[List[Tuple], List[Tuple]]:
         px = df['close'].to_numpy(np.float64)
@@ -54,7 +56,8 @@ class DCAJITStrategy:
             self.reopen_sec,
             int(self.compound), self.risk_pct,
             int(self.long_only),
-            int(self.exit_on_flip)
+            int(self.exit_on_flip),
+            self.max_hold_days, self.stop_loss_pct  # Pass new params
         )
 
         deals = [(int(r[0]), int(r[1]), float(r[2]), float(r[3])) for r in deals_np]
@@ -71,7 +74,9 @@ def _loop(
     fee_rate: float, init_cash: float,
     reopen_sec: int, compound_int: int, risk_pct: float,
     long_only_int: int,
-    exit_on_flip_int: int
+    exit_on_flip_int: int,
+    max_hold_days: int,  # New
+    stop_loss_pct: float  # New
 ):
     n = len(px)
     deals = NbList.empty_list(nb.float64[:])
@@ -80,6 +85,7 @@ def _loop(
     cash = init_cash
     qty = 0.0
     avg = 0.0
+    base_price = 0.0  # New: Track initial base order price for SL
     side = 0     # 0 idle, +1 long, −1 short
     in_trade = False
     ladder0 = base_order
@@ -124,6 +130,7 @@ def _loop(
 
             qty += qty_change
             avg = p
+            base_price = p  # New: Set base_price to initial entry price
             ladder0 = usd
             safety_cnt = 0
             next_order = p * (1 - spacing_pct / 100) if side == 1 else p * (1 + spacing_pct / 100)
@@ -175,6 +182,16 @@ def _loop(
         if exit_on_flip_int and trend_flip:
             exit_now = True
 
+        # New: Max hold time exit (in seconds, assuming ts is unix)
+        if in_trade and (t - entry_ts) > (max_hold_days * 86400):
+            exit_now = True
+
+        # New: Stop-loss exit (now from base_price)
+        sl_target = base_price * (1 - stop_loss_pct / 100) if side == 1 else base_price * (1 + stop_loss_pct / 100)
+        sl_hit = (side == 1 and p <= sl_target) or (side == -1 and p >= sl_target)
+        if sl_hit:
+            exit_now = True
+
         # ------------- close -------------
         if exit_now:
             if side == 1:
@@ -191,6 +208,7 @@ def _loop(
 
             qty = 0.0
             avg = 0.0
+            base_price = 0.0  # Reset
             in_trade = False
             side = 0
             last_close = t
