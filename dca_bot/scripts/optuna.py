@@ -93,6 +93,8 @@ def main() -> None:
                     help="0 = all CPU cores")
     pa.add_argument("--storage", default="sqlite:///dca.sqlite",
                     help="'none' for in-memory Optuna studies")
+    pa.add_argument("--window-months", type=int, default=12,
+                    help="Size of each walk-forward window in months (e.g., 6 for half-year slices)")
 
     # NEW flags -------------------------------------------------------
     pa.add_argument("--use-sig", type=int, choices=[0, 1], default=1,
@@ -132,8 +134,10 @@ def main() -> None:
     window_results = []
     overall_summary = {'best': []}
     current_start = df.index.min()
-    while current_start + relativedelta(months=12) <= df.index.max():
-        end_win = current_start + relativedelta(months=12)
+    window_size = args.window_months
+    slide_months = window_size // 2  # Slide by half the window size for overlap
+    while current_start + relativedelta(months=window_size) <= df.index.max():
+        end_win = current_start + relativedelta(months=window_size)
         delta = end_win - current_start
         train_days = int(0.7 * delta.days)
         train_end = current_start + pd.Timedelta(days=train_days)
@@ -176,7 +180,7 @@ def main() -> None:
         # Aggregate for overall
         overall_summary['best'].append(best_mc['avg_apy_pct'])
 
-        current_start += relativedelta(months=6)
+        current_start += relativedelta(months=slide_months)
 
     # ------------------------------------------------ Overall aggregates
     overall = {
@@ -186,17 +190,20 @@ def main() -> None:
 
     # ------------------------------------------------ Compute optimal overall parameters
     if window_results:
+        spacings = [w['best']['params']['spacing_pct'] for w in window_results]
         tps = [w['best']['params']['tp_pct'] for w in window_results]
         trailings = [w['best']['params']['trailing'] for w in window_results]
 
+        avg_spacing = np.mean(spacings)
         avg_tp = np.mean(tps)
         majority_trailing = bool(np.sum(trailings) > len(trailings) / 2)  # Explicitly cast to Python bool
 
         # Round to nearest 0.1 (matching search step)
+        rounded_spacing = round(avg_spacing / 0.1) * 0.1
         rounded_tp = round(avg_tp / 0.1) * 0.1
 
         optimal_params = {
-            'spacing_pct': 0.3,
+            'spacing_pct': rounded_spacing,
             'tp_pct': rounded_tp,
             'trailing': majority_trailing,
             'trailing_pct': 0.1  # Fixed
