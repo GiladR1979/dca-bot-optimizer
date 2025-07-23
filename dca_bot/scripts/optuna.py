@@ -6,6 +6,7 @@ New flags
 --use-sig    1 (default) = wait for Bollinger+RSI trigger
              0           = ignore trigger
 --reopen-sec N   Seconds to wait after a deal closes when --use-sig is 0
+--no-flip-exit {0,1} 1 = disable Supertrend flip exits (exit only on TP/trailing), 0 = keep flip exits (default)
 """
 
 import argparse
@@ -37,9 +38,10 @@ def run_set(
     use_sig: int,
     reopen_sec: int,
     long_only: bool = False,
+    exit_on_flip: bool = True,
 ) -> Tuple[Dict, str, Tuple]:
     """Back-test one parameter set and return (metrics, PNG path, panel item)."""
-    bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, slippage_pct=0.001)
+    bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, exit_on_flip=exit_on_flip)
     deals, eq = bot.backtest(df)
     met = calc_metrics(deals, eq)
 
@@ -54,6 +56,7 @@ def monte_carlo_backtest(
     use_sig: int,
     reopen_sec: int,
     long_only: bool = False,
+    exit_on_flip: bool = True,
     num_sims: int = 100,
     noise_std: float = 0.001,  # 0.1% std dev noise
 ) -> Dict:
@@ -63,7 +66,7 @@ def monte_carlo_backtest(
         df_pert = df.copy()
         # Multiplicative noise for realistic volatility simulation
         df_pert['close'] *= (1 + np.random.normal(0, noise_std, len(df_pert)))
-        bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, slippage_pct=0.001)
+        bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, exit_on_flip=exit_on_flip)
         deals, eq = bot.backtest(df_pert)
         met = calc_metrics(deals, eq)
         all_met.append(met)
@@ -100,6 +103,8 @@ def main() -> None:
                          "(default 60 s)")
     pa.add_argument("--long-only", type=int, choices=[0, 1], default=0,
                     help="1 = long positions only, 0 = both long and short (default)")
+    pa.add_argument("--no-flip-exit", type=int, choices=[0, 1], default=0,
+                    help="1 = disable Supertrend flip exits (exit only on TP/trailing), 0 = keep flip exits (default)")
 
     pa.add_argument("-v", "--verbose", action="store_true")
     args = pa.parse_args()
@@ -117,6 +122,9 @@ def main() -> None:
     if df.empty:
         sys.exit("No candles returned – check date range.")
     df = df.sort_index()  # Ensure sorted by time
+
+    # Define exit_on_flip based on flag (1 = no flip exit = False)
+    exit_on_flip = args.no_flip_exit == 0
 
     # ------------------------------------------------ Walk-Forward Optimization
     window_results = []
@@ -137,7 +145,7 @@ def main() -> None:
         best_st = run_best_study(
             train_df,
             symbol=args.symbol,
-            n_trials_each=args.trials,
+            n_trials=args.trials,
             n_jobs=(os.cpu_count() if args.jobs == 0 else args.jobs),
             storage=args.storage,
             use_sig=args.use_sig,
@@ -153,7 +161,7 @@ def main() -> None:
         best_p, _ = _pick(best_st)
 
         # Validate with Monte Carlo on test
-        best_mc = monte_carlo_backtest(test_df, best_p, args.use_sig, args.reopen_sec, bool(args.long_only))
+        best_mc = monte_carlo_backtest(test_df, best_p, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip)
 
         window_summary = {
             'window_start': str(current_start),
@@ -197,12 +205,12 @@ def main() -> None:
 
         # Generate and save "best" graph with optimal params on full data
         optimal_mc, optimal_png, _ = run_set(
-            optimal_params, df, "optimal", args.symbol, args.use_sig, args.reopen_sec, bool(args.long_only)
+            optimal_params, df, "optimal", args.symbol, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip
         )
 
         overall['optimal_params'] = optimal_params
         overall['optimal_png'] = optimal_png
-        overall['optimal_mc_metrics'] = monte_carlo_backtest(df, optimal_params, args.use_sig, args.reopen_sec, bool(args.long_only))
+        overall['optimal_mc_metrics'] = monte_carlo_backtest(df, optimal_params, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip)
     else:
         print("No windows processed – cannot compute optimal parameters.")
 
@@ -218,9 +226,10 @@ def main() -> None:
         trailing=True,
         trailing_pct=0.1,
     )
-    default_mc = monte_carlo_backtest(df, default_p, args.use_sig, args.reopen_sec, bool(args.long_only))
+    default_mc = monte_carlo_backtest(df, default_p, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip)
     print(f"Default MC on full data: {json.dumps(default_mc, indent=2)}")
 
 
 if __name__ == "__main__":
     main()
+    

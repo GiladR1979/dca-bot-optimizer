@@ -46,6 +46,7 @@ def _evaluate(
     use_sig: int,
     reopen_sec: int,
     long_only: bool = False,
+    exit_on_flip: bool = True,
 ) -> Dict[str, float]:
     bot = DCATrailingStrategy(
         spacing_pct=spacing,
@@ -55,7 +56,7 @@ def _evaluate(
         use_sig=use_sig,
         reopen_sec=reopen_sec,
         long_only=long_only,
-        slippage_pct=0.001,  # Added for realism
+        exit_on_flip=exit_on_flip,
     )
     deals, eq = bot.backtest(df)
     return calc_metrics(deals, eq)
@@ -65,7 +66,7 @@ def _evaluate(
 #  objective factory                                                 #
 # ------------------------------------------------------------------ #
 
-def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reopen_sec: int, long_only: bool = False):
+def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reopen_sec: int, long_only: bool = False, exit_on_flip: bool = True):
     """Return an Optuna objective that optimises a single metric."""
 
     head = (
@@ -90,13 +91,13 @@ def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reop
             raise optuna.TrialPruned()
 
         # ---------- fast head‑run for early pruning --------------------
-        m_head = _evaluate(head, spacing, tp, trailing, trail_pct, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only)
+        m_head = _evaluate(head, spacing, tp, trailing, trail_pct, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, exit_on_flip=exit_on_flip)
         trial.report(m_head[metric_key], step=0)
         if trial.should_prune():
             raise optuna.TrialPruned()
 
         # ---------- full back‑test ------------------------------------
-        m_full = _evaluate(df_full, spacing, tp, trailing, trail_pct, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only)
+        m_full = _evaluate(df_full, spacing, tp, trailing, trail_pct, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, exit_on_flip=exit_on_flip)
         trial.set_user_attr("metrics", m_full)
         trial.set_user_attr(
             "params",
@@ -140,8 +141,6 @@ def _new_study(base_name: str, direction: str, storage: Optional[str], symbol: s
     if window_id:
         full_name += f"_{window_id}"
     sampler = optuna.samplers.TPESampler(seed=42)  # no duplicates
-    # Disable early‑stopping of “bad” trials for now
-    #pruner = optuna.pruners.MedianPruner(n_startup_trials=10)
     pruner = optuna.pruners.NopPruner()
 
     if storage:
@@ -168,67 +167,26 @@ def _new_study(base_name: str, direction: str, storage: Optional[str], symbol: s
 
 
 # ------------------------------------------------------------------ #
-#  seed a study with finished trials                                 #
-# ------------------------------------------------------------------ #
-
-def seed_from(source: optuna.study.Study, dest: optuna.study.Study, metric_key: str):
-    """Clone completed trials from *source* to *dest*, skipping NaNs."""
-
-    import math
-
-    for t in source.trials:
-        if t.state != optuna.trial.TrialState.COMPLETE:
-            continue
-        m = t.user_attrs.get("metrics", {})
-        if metric_key not in m:
-            continue
-        val = m[metric_key]
-        if val is None or (isinstance(val, float) and math.isnan(val)):
-            continue
-
-        cloned = optuna.trial.create_trial(
-            params=t.user_attrs["params"],
-            distributions=source.best_trial.distributions,
-            value=val,
-            user_attrs=t.user_attrs,
-            state=optuna.trial.TrialState.COMPLETE,
-        )
-        dest.add_trial(cloned)
-
-        # register the cloned parameters so later samplers won't repeat them
-        sig = _param_sig(
-            cloned.params["spacing_pct"],
-            cloned.params["tp_pct"],
-            cloned.params["trailing"],
-            cloned.params["trailing_pct"],
-        )
-        _seen_params.add(sig)
-
-
-# ------------------------------------------------------------------ #
 #  high‑level helper                                                 #
 # ------------------------------------------------------------------ #
 
 def run_best_study(
     df: pd.DataFrame,
     symbol: str,
-    n_trials_each: int,
+    n_trials: int,
     n_jobs: int,
     storage: Optional[str],
     use_sig: int = 1,
     reopen_sec: int = 60,
     long_only: bool = False,
+    exit_on_flip: bool = True,
     window_id: str = "",
 ):
-    """Run BEST Optuna study for *symbol*."""
-
-    # ---------- BEST (annual %) --------------------------------------
     study_best = _new_study("dca_best", "maximize", storage, symbol, window_id)
     study_best.optimize(
-        make_objective(df, "annual_pct", use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only),
-        n_trials=n_trials_each,
+        make_objective(df, "annual_pct", use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, exit_on_flip=exit_on_flip),
+        n_trials=n_trials,
         n_jobs=n_jobs,
         show_progress_bar=True,
     )
-
     return study_best

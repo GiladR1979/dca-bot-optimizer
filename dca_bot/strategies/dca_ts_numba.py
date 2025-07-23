@@ -11,16 +11,31 @@ import pandas_ta as pta
 from numba.typed import List as NbList
 
 
-def _entry_signal(df: pd.DataFrame, tf: str = "30min") -> np.ndarray:
-    ohlc = df.resample(tf).agg(
+def _entry_signal(df: pd.DataFrame) -> np.ndarray:
+    """Compute Supertrend on 5m and 30m, return bull only if both align."""
+    # 5m Supertrend
+    ohlc_5m = df.resample("5min").agg(
         high=("high", "max"),
         low=("low", "min"),
         close=("close", "last"),
     ).dropna()
-    st = pta.supertrend(ohlc['high'], ohlc['low'], ohlc['close'], length=10, multiplier=3)
-    dir_col = [c for c in st.columns if c.startswith('SUPERTd')][0]
-    bull_tf = (st[dir_col] == 1).astype(np.uint8)
-    return bull_tf.reindex(df.index, method='ffill').fillna(0).to_numpy(np.uint8)
+    st_5m = pta.supertrend(ohlc_5m['high'], ohlc_5m['low'], ohlc_5m['close'], length=10, multiplier=3)
+    dir_col_5m = [c for c in st_5m.columns if c.startswith('SUPERTd')][0]
+    bull_5m = (st_5m[dir_col_5m] == 1).astype(np.uint8).reindex(df.index, method='ffill').fillna(0)
+
+    # 30m Supertrend (longer timeframe)
+    ohlc_30m = df.resample("30min").agg(
+        high=("high", "max"),
+        low=("low", "min"),
+        close=("close", "last"),
+    ).dropna()
+    st_30m = pta.supertrend(ohlc_30m['high'], ohlc_30m['low'], ohlc_30m['close'], length=10, multiplier=3)
+    dir_col_30m = [c for c in st_30m.columns if c.startswith('SUPERTd')][0]
+    bull_30m = (st_30m[dir_col_30m] == 1).astype(np.uint8).reindex(df.index, method='ffill').fillna(0)
+
+    # Align: bull if both 5m and 30m are bull; bear if both not bull
+    aligned_bull = (bull_5m & bull_30m).to_numpy(np.uint8)
+    return aligned_bull
 
 
 @dataclass
@@ -39,7 +54,7 @@ class DCAJITStrategy:
     use_sig: int = 1  # compatibility placeholder
     reopen_sec: int = -1
     long_only: bool = False
-    slippage_pct: float = 0.001  # New: 0.1% slippage
+    exit_on_flip: bool = True  # New switch: exit on Supertrend flip
 
     def backtest(self, df: pd.DataFrame) -> Tuple[List[Tuple], List[Tuple]]:
         px = df['close'].to_numpy(np.float64)
@@ -54,7 +69,7 @@ class DCAJITStrategy:
             self.reopen_sec,
             int(self.compound), self.risk_pct,
             int(self.long_only),
-            self.slippage_pct  # Pass new param
+            int(self.exit_on_flip)  # Pass new param
         )
 
         deals = [(int(r[0]), int(r[1]), float(r[2]), float(r[3])) for r in deals_np]
@@ -71,7 +86,7 @@ def _loop(
     fee_rate: float, init_cash: float,
     reopen_sec: int, compound_int: int, risk_pct: float,
     long_only_int: int,
-    slippage_pct: float  # New param
+    exit_on_flip_int: int
 ):
     n = len(px)
     deals = NbList.empty_list(nb.float64[:])
@@ -112,23 +127,18 @@ def _loop(
 
             side = 1 if open_long else -1
             usd = cash * risk_pct if compound_int == 1 else base_order
-            if side == 1:  # Buy for long
-                effective_p = p * (1 + slippage_pct)
-                qty_change = usd / effective_p
-                fee = usd * fee_rate
-                cash -= usd + fee
-            else:  # Sell for short
-                effective_p = p * (1 - slippage_pct)
-                qty_sold = usd / p
-                cash_received = qty_sold * effective_p
-                fee = cash_received * fee_rate
-                qty_change = -qty_sold
-                cash += cash_received - fee
+            fee = usd * fee_rate
+            qty_change = side * usd / p
 
             cash_start = cash
 
+            if side == 1:
+                cash -= usd + fee
+            else:
+                cash += usd - fee
+
             qty += qty_change
-            avg = p  # Avg based on original p for TP calc
+            avg = p
             ladder0 = usd
             safety_cnt = 0
             next_order = p * (1 - spacing_pct / 100) if side == 1 else p * (1 + spacing_pct / 100)
@@ -142,22 +152,17 @@ def _loop(
         if in_trade and need_safety and safety_cnt < max_safety:
             safety_cnt += 1
             usd = ladder0 * (mult ** safety_cnt)
-            if side == 1:  # Buy safety for long
-                effective_p = p * (1 + slippage_pct)
-                qty_change = usd / effective_p
-                fee = usd * fee_rate
+            fee = usd * fee_rate
+            qty_change = side * usd / p
+
+            if side == 1:
                 cash -= usd + fee
-            else:  # Sell safety for short
-                effective_p = p * (1 - slippage_pct)
-                qty_sold = usd / p
-                cash_received = qty_sold * effective_p
-                fee = cash_received * fee_rate
-                qty_change = -qty_sold
-                cash += cash_received - fee
+            else:
+                cash += usd - fee
 
             qty_old = qty
             qty += qty_change
-            avg = (avg * abs(qty_old) + p * abs(qty_change)) / abs(qty)  # Use original p for avg
+            avg = (avg * abs(qty_old) + p * abs(qty_change)) / abs(qty)
             next_order = p * (1 - spacing_pct / 100) if side == 1 else p * (1 + spacing_pct / 100)
             trail_ext = p
 
@@ -180,21 +185,19 @@ def _loop(
             else:
                 exit_now = True
 
-        # trend flip
+        # trend flip on longer timeframe (30m, as it's the resample for bull)
         trend_flip = (side == 1 and not trend_bull) or (side == -1 and trend_bull)
-        if trend_flip:
+        if exit_on_flip_int and trend_flip:
             exit_now = True
 
         # ------------- close -------------
         if exit_now:
-            if side == 1:  # Sell to close long
-                effective_p = p * (1 - slippage_pct)
-                proceeds = abs(qty) * effective_p
+            if side == 1:
+                proceeds = abs(qty) * p
                 fee = proceeds * fee_rate
                 cash += proceeds - fee
-            else:  # Buy to close short
-                effective_p = p * (1 + slippage_pct)
-                buy_cost = abs(qty) * effective_p
+            else:
+                buy_cost = abs(qty) * p
                 fee = buy_cost * fee_rate
                 cash -= buy_cost + fee
 
