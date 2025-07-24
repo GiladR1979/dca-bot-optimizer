@@ -37,25 +37,25 @@ def _bb_percent(df: pd.DataFrame) -> np.ndarray:
     return bb_per.to_numpy(np.float64)
 
 
-def _supertrend(df: pd.DataFrame) -> np.ndarray:
-    ohlc_30m = df.resample("30min").agg(
+def _supertrend(df: pd.DataFrame, tf: str = "30min") -> np.ndarray:
+    ohlc = df.resample(tf).agg(
         high=("high", "max"),
         low=("low", "min"),
         close=("close", "last"),
     ).dropna()
-    atr = _atr(ohlc_30m.high, ohlc_30m.low, ohlc_30m.close, window=10)
-    hl2 = (ohlc_30m.high + ohlc_30m.low) / 2
+    atr = _atr(ohlc.high, ohlc.low, ohlc.close, window=10)
+    hl2 = (ohlc.high + ohlc.low) / 2
     upper = hl2 + 3 * atr
     lower = hl2 - 3 * atr
-    st = pd.Series(np.nan, index=ohlc_30m.index)
-    bull = pd.Series(True, index=ohlc_30m.index)
-    for i in range(1, len(ohlc_30m)):
+    st = pd.Series(np.nan, index=ohlc.index)
+    bull = pd.Series(True, index=ohlc.index)
+    for i in range(1, len(ohlc)):
         if bull.iat[i - 1]:
             st.iat[i] = max(lower.iat[i], st.iat[i - 1] if not np.isnan(st.iat[i - 1]) else lower.iat[i])
-            bull.iat[i] = ohlc_30m.close.iat[i] > st.iat[i]
+            bull.iat[i] = ohlc.close.iat[i] > st.iat[i]
         else:
             st.iat[i] = min(upper.iat[i], st.iat[i - 1] if not np.isnan(st.iat[i - 1]) else upper.iat[i])
-            bull.iat[i] = ohlc_30m.close.iat[i] > st.iat[i]
+            bull.iat[i] = ohlc.close.iat[i] > st.iat[i]
     return bull.reindex(df.index, method='ffill').fillna(False).to_numpy(np.bool_)
 
 
@@ -77,12 +77,13 @@ class DCAJITStrategy:
     long_only: bool = False
     exit_on_flip: bool = True
     use_bb_safety: bool = True
+    supertrend_tf: str = "30min"
 
     def backtest(self, df: pd.DataFrame) -> Tuple[List[Tuple], List[Tuple]]:
         px = df['close'].to_numpy(np.float64)
         ts = df.index.view('int64') // 1_000_000_000
         bb_percent = _bb_percent(df)
-        bull = _supertrend(df)
+        bull = _supertrend(df, self.supertrend_tf)
 
         deals_np, eq_np = _loop(
             ts, px, bb_percent, bull,
