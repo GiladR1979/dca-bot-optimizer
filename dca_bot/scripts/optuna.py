@@ -8,6 +8,7 @@ New flags
              0           = ignore trigger
 --reopen-sec N   Seconds to wait after a deal closes when --use-sig is 0
 --no-flip-exit {0,1} 1 = disable Supertrend flip exits (exit only on TP/trailing), 0 = keep flip exits (default)
+--no-bb-safety  Disable BB condition for safety orders, use constant spacing only
 """
 
 import argparse
@@ -40,9 +41,10 @@ def run_set(
     reopen_sec: int,
     long_only: bool = False,
     exit_on_flip: bool = True,
+    use_bb_safety: bool = True,
 ) -> Tuple[Dict, str, Tuple]:
     """Back-test one parameter set and return (metrics, PNG path, panel item)."""
-    bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only)
+    bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, use_bb_safety=use_bb_safety)
     deals, eq = bot.backtest(df)
     met = calc_metrics(deals, eq)
 
@@ -58,6 +60,7 @@ def monte_carlo_backtest(
     reopen_sec: int,
     long_only: bool = False,
     exit_on_flip: bool = True,
+    use_bb_safety: bool = True,
     num_sims: int = 100,
     noise_std: float = 0.001,  # 0.1% std dev noise
 ) -> Dict:
@@ -67,7 +70,7 @@ def monte_carlo_backtest(
         df_pert = df.copy()
         # Multiplicative noise for realistic volatility simulation
         df_pert['close'] *= (1 + np.random.normal(0, noise_std, len(df_pert)))
-        bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only)
+        bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, use_bb_safety=use_bb_safety)
         deals, eq = bot.backtest(df_pert)
         met = calc_metrics(deals, eq)
         all_met.append(met)
@@ -112,6 +115,8 @@ def main() -> None:
                     help="1 = disable Supertrend flip exits (exit only on TP/trailing), 0 = keep flip exits (default)")
     pa.add_argument("--no-graph", action="store_true",
                     help="Skip generating and saving the equity curve PNG (speeds up execution)")
+    pa.add_argument("--no-bb-safety", action="store_true",
+                    help="Disable BB condition for safety orders, use constant spacing only")
 
     pa.add_argument("-v", "--verbose", action="store_true")
     args = pa.parse_args()
@@ -132,6 +137,7 @@ def main() -> None:
 
     # Define exit_on_flip based on flag (1 = no flip exit = False)
     exit_on_flip = args.no_flip_exit == 0
+    use_bb_safety = not args.no_bb_safety
 
     if args.full_dataset:
         # ------------------------------------------------ Full dataset optimization (no windows)
@@ -146,6 +152,7 @@ def main() -> None:
             reopen_sec=args.reopen_sec,
             long_only=bool(args.long_only),
             exit_on_flip=exit_on_flip,
+            use_bb_safety=use_bb_safety,
             window_id="",  # No window ID for full
         )
 
@@ -156,7 +163,7 @@ def main() -> None:
         best_p, _ = _pick(best_st)
 
         # MC on full (no split)
-        best_mc = monte_carlo_backtest(df, best_p, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip)
+        best_mc = monte_carlo_backtest(df, best_p, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip, use_bb_safety=use_bb_safety)
 
         window_results = [{
             'window_start': str(df.index.min()),
@@ -193,6 +200,7 @@ def main() -> None:
                 reopen_sec=args.reopen_sec,
                 long_only=bool(args.long_only),
                 exit_on_flip=exit_on_flip,
+                use_bb_safety=use_bb_safety,
                 window_id=window_id,
             )
 
@@ -203,7 +211,7 @@ def main() -> None:
             best_p, _ = _pick(best_st)
 
             # Validate with Monte Carlo on test
-            best_mc = monte_carlo_backtest(test_df, best_p, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip)
+            best_mc = monte_carlo_backtest(test_df, best_p, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip, use_bb_safety=use_bb_safety)
 
             window_summary = {
                 'window_start': str(current_start),
@@ -248,17 +256,17 @@ def main() -> None:
         # Generate and save "best" graph with optimal params on full data (if not skipped)
         if not args.no_graph:
             optimal_met, optimal_png, _ = run_set(
-                optimal_params, df, "optimal", args.symbol, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip
+                optimal_params, df, "optimal", args.symbol, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip, use_bb_safety=use_bb_safety
             )
         else:
-            bot = DCATrailingStrategy(**optimal_params, use_sig=args.use_sig, reopen_sec=args.reopen_sec, long_only=bool(args.long_only))
+            bot = DCATrailingStrategy(**optimal_params, use_sig=args.use_sig, reopen_sec=args.reopen_sec, long_only=bool(args.long_only), use_bb_safety=use_bb_safety)
             deals, eq = bot.backtest(df)
             optimal_met = calc_metrics(deals, eq)
             optimal_png = None
 
         overall['optimal_params'] = optimal_params
         overall['optimal_png'] = optimal_png
-        overall['optimal_mc_metrics'] = monte_carlo_backtest(df, optimal_params, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip)
+        overall['optimal_mc_metrics'] = monte_carlo_backtest(df, optimal_params, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip, use_bb_safety=use_bb_safety)
     else:
         print("No windows processed – cannot compute optimal parameters.")
 
@@ -274,7 +282,7 @@ def main() -> None:
         trailing=True,
         trailing_pct=0.1,
     )
-    default_mc = monte_carlo_backtest(df, default_p, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip)
+    default_mc = monte_carlo_backtest(df, default_p, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip, use_bb_safety=use_bb_safety)
     print(f"Default MC on full data: {json.dumps(default_mc, indent=2)}")
 
 

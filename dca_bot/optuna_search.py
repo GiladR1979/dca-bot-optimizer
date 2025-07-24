@@ -45,6 +45,7 @@ def _evaluate(
     reopen_sec: int,
     long_only: bool = False,
     exit_on_flip: bool = True,
+    use_bb_safety: bool = True,
 ) -> Dict[str, float]:
     bot = DCATrailingStrategy(
         spacing_pct=spacing,
@@ -55,6 +56,7 @@ def _evaluate(
         reopen_sec=reopen_sec,
         long_only=long_only,
         exit_on_flip=exit_on_flip,
+        use_bb_safety=use_bb_safety,
     )
     deals, eq = bot.backtest(df)
     return calc_metrics(deals, eq)
@@ -64,7 +66,7 @@ def _evaluate(
 #  objective factory                                                 #
 # ------------------------------------------------------------------ #
 
-def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reopen_sec: int, long_only: bool = False, exit_on_flip: bool = True):
+def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reopen_sec: int, long_only: bool = False, exit_on_flip: bool = True, use_bb_safety: bool = True):
     """Return an Optuna objective that optimises a single metric."""
 
     head = (
@@ -89,13 +91,13 @@ def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reop
             raise optuna.TrialPruned()
 
         # ---------- fast head‑run for early pruning --------------------
-        m_head = _evaluate(head, spacing, tp, trailing, trail_pct, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, exit_on_flip=exit_on_flip)
+        m_head = _evaluate(head, spacing, tp, trailing, trail_pct, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, exit_on_flip=exit_on_flip, use_bb_safety=use_bb_safety)
         trial.report(m_head[metric_key], step=0)
         if trial.should_prune():
             raise optuna.TrialPruned()
 
         # ---------- full back‑test ------------------------------------
-        m_full = _evaluate(df_full, spacing, tp, trailing, trail_pct, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, exit_on_flip=exit_on_flip)
+        m_full = _evaluate(df_full, spacing, tp, trailing, trail_pct, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, exit_on_flip=exit_on_flip, use_bb_safety=use_bb_safety)
         trial.set_user_attr("metrics", m_full)
         trial.set_user_attr(
             "params",
@@ -178,11 +180,12 @@ def run_best_study(
     reopen_sec: int = 60,
     long_only: bool = False,
     exit_on_flip: bool = True,
+    use_bb_safety: bool = True,
     window_id: str = "",
 ):
     study_best = _new_study("dca_best", "maximize", storage, symbol, window_id)
     study_best.optimize(
-        make_objective(df, "annual_pct", use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, exit_on_flip=exit_on_flip),
+        make_objective(df, "annual_pct", use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, exit_on_flip=exit_on_flip, use_bb_safety=use_bb_safety),
         n_trials=n_trials,
         n_jobs=n_jobs,
         show_progress_bar=True,

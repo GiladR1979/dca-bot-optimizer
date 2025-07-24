@@ -76,6 +76,7 @@ class DCAJITStrategy:
     reopen_sec: int = -1
     long_only: bool = False
     exit_on_flip: bool = True
+    use_bb_safety: bool = True
 
     def backtest(self, df: pd.DataFrame) -> Tuple[List[Tuple], List[Tuple]]:
         px = df['close'].to_numpy(np.float64)
@@ -92,7 +93,8 @@ class DCAJITStrategy:
             int(self.compound), self.risk_pct,
             int(self.long_only),
             int(self.exit_on_flip),
-            60  # cooldown_sec for safety orders
+            60,  # cooldown_sec for safety orders
+            int(self.use_bb_safety)
         )
 
         deals = [(int(r[0]), int(r[1]), float(r[2]), float(r[3])) for r in deals_np]
@@ -110,7 +112,8 @@ def _loop(
     reopen_sec: int, compound_int: int, risk_pct: float,
     long_only_int: int,
     exit_on_flip_int: int,
-    cooldown_sec: int
+    cooldown_sec: int,
+    use_bb_safety_int: int
 ):
     n = len(px)
     deals = NbList.empty_list(nb.float64[:])
@@ -176,7 +179,7 @@ def _loop(
 
         # ------------- safety orders -------------
         need_safety = (side == 1 and p <= next_order) or (side == -1 and p >= next_order)
-        bb_condition = (side == 1 and bbp < 0.1) or (side == -1 and bbp > 0.9)
+        bb_condition = True if use_bb_safety_int == 0 else ((side == 1 and bbp < 0.1) or (side == -1 and bbp > 0.9))
         if in_trade and need_safety and bb_condition and safety_cnt < max_safety and (t - entry_ts >= cooldown_sec):
             safety_cnt += 1
             usd = ladder0 * (mult ** safety_cnt)
