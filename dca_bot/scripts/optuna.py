@@ -1,3 +1,4 @@
+# optuna.py
 """
 CLI – runs BEST Optuna study, computes optimal parameters, and generates a graph.
 
@@ -41,7 +42,7 @@ def run_set(
     exit_on_flip: bool = True,
 ) -> Tuple[Dict, str, Tuple]:
     """Back-test one parameter set and return (metrics, PNG path, panel item)."""
-    bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, exit_on_flip=exit_on_flip)
+    bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only)
     deals, eq = bot.backtest(df)
     met = calc_metrics(deals, eq)
 
@@ -66,7 +67,7 @@ def monte_carlo_backtest(
         df_pert = df.copy()
         # Multiplicative noise for realistic volatility simulation
         df_pert['close'] *= (1 + np.random.normal(0, noise_std, len(df_pert)))
-        bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, exit_on_flip=exit_on_flip)
+        bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only)
         deals, eq = bot.backtest(df_pert)
         met = calc_metrics(deals, eq)
         all_met.append(met)
@@ -100,13 +101,13 @@ def main() -> None:
 
     # NEW flags -------------------------------------------------------
     pa.add_argument("--use-sig", type=int, choices=[0, 1], default=1,
-                    help="1 = use Bollinger/RSI trigger (default); "
+                    help="1 = use trigger (default); "
                          "0 = ignore trigger")
     pa.add_argument("--reopen-sec", type=int, default=60,
                     help="Delay before reopening when --use-sig 0 "
                          "(default 60 s)")
-    pa.add_argument("--long-only", type=int, choices=[0, 1], default=1,
-                    help="1 = long positions only (default), 0 = both long and short")
+    pa.add_argument("--long-only", type=int, choices=[0, 1], default=0,
+                    help="1 = long positions only, 0 = both long and short (default)")
     pa.add_argument("--no-flip-exit", type=int, choices=[0, 1], default=0,
                     help="1 = disable Supertrend flip exits (exit only on TP/trailing), 0 = keep flip exits (default)")
     pa.add_argument("--no-graph", action="store_true",
@@ -227,28 +228,20 @@ def main() -> None:
         spacings = [w['best']['params']['spacing_pct'] for w in window_results]
         tps = [w['best']['params']['tp_pct'] for w in window_results]
         trailings = [w['best']['params']['trailing'] for w in window_results]
-        sls = [w['best']['params']['stop_loss_pct'] for w in window_results]  # New
-        max_holds = [w['best']['params']['max_hold_days'] for w in window_results]  # New
 
         avg_spacing = np.mean(spacings)
         avg_tp = np.mean(tps)
-        avg_sl = np.mean(sls)  # New
-        avg_max_hold = np.mean(max_holds)  # New
         majority_trailing = bool(np.sum(trailings) > len(trailings) / 2)  # Explicitly cast to Python bool
 
         # Round to nearest 0.1 (matching search step)
         rounded_spacing = round(avg_spacing / 0.1) * 0.1
         rounded_tp = round(avg_tp / 0.1) * 0.1
-        rounded_sl = round(avg_sl / 1.0) * 1.0  # Round to nearest 1% for SL
-        rounded_max_hold = round(avg_max_hold / 10) * 10  # Round to nearest 10 days
 
         optimal_params = {
             'spacing_pct': rounded_spacing,
             'tp_pct': rounded_tp,
             'trailing': majority_trailing,
             'trailing_pct': 0.1,  # Fixed
-            'stop_loss_pct': rounded_sl,  # New
-            'max_hold_days': rounded_max_hold,  # New
         }
         print(f"Optimal overall parameters: {json.dumps(optimal_params, indent=2)}")
 
@@ -258,7 +251,7 @@ def main() -> None:
                 optimal_params, df, "optimal", args.symbol, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip
             )
         else:
-            bot = DCATrailingStrategy(**optimal_params, use_sig=args.use_sig, reopen_sec=args.reopen_sec, long_only=bool(args.long_only), exit_on_flip=exit_on_flip)
+            bot = DCATrailingStrategy(**optimal_params, use_sig=args.use_sig, reopen_sec=args.reopen_sec, long_only=bool(args.long_only))
             deals, eq = bot.backtest(df)
             optimal_met = calc_metrics(deals, eq)
             optimal_png = None
@@ -280,8 +273,6 @@ def main() -> None:
         tp_pct=0.6,
         trailing=True,
         trailing_pct=0.1,
-        stop_loss_pct=20.0,  # Add default SL
-        max_hold_days=30,  # Add default max hold
     )
     default_mc = monte_carlo_backtest(df, default_p, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip)
     print(f"Default MC on full data: {json.dumps(default_mc, indent=2)}")

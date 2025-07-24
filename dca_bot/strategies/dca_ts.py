@@ -1,34 +1,80 @@
-
 """
 Dual‑side (long + short) DCA strategy for spot accounts.
-Positions flip automatically on every 8‑hour SuperTrend cross.
+Positions flip automatically on every 30‑min SuperTrend cross.
 Profit is measured as the net change in cash for each deal.
 """
 from typing import List, Tuple, Optional
 import numpy as np
 import pandas as pd
-from ta.volatility import AverageTrueRange
 
+# Implement ATR without ta.volatility
+def _atr(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 10) -> pd.Series:
+    prev_close = close.shift(1)
+    tr1 = high - low
+    tr2 = abs(high - prev_close)
+    tr3 = abs(low - prev_close)
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=window).mean()
+    return atr
+
+def _supertrend_signal(df: pd.DataFrame) -> pd.Series:
+    tf = "30min"
+    hlc = df.resample(tf).agg(
+        high=("high", "max"),
+        low=("low", "min"),
+        close=("close", "last"),
+    ).dropna()
+    atr = _atr(hlc["high"], hlc["low"], hlc["close"], window=10)
+    hl2 = (hlc["high"] + hlc["low"]) / 2
+    upper = hl2 + 3 * atr
+    lower = hl2 - 3 * atr
+
+    st = pd.Series(np.nan, index=hlc.index)
+    bull = pd.Series(True, index=hlc.index)
+
+    for i in range(1, len(hlc)):
+        if bull.iat[i - 1]:
+            st.iat[i] = max(lower.iat[i], st.iat[i - 1] if not np.isnan(st.iat[i - 1]) else lower.iat[i])
+            bull.iat[i] = hlc['close'].iat[i] > st.iat[i]
+        else:
+            st.iat[i] = min(upper.iat[i], st.iat[i - 1] if not np.isnan(st.iat[i - 1]) else upper.iat[i])
+            bull.iat[i] = hlc['close'].iat[i] > st.iat[i]
+
+    return bull.reindex(df.index, method="ffill").fillna(False)
+
+def _bb_percent(df: pd.DataFrame) -> pd.Series:
+    ohlc_3m = df.resample("3min").agg(
+        high=("high", "max"),
+        low=("low", "min"),
+        close=("close", "last"),
+    ).dropna()
+    close = ohlc_3m['close']
+    mean = close.rolling(20).mean()
+    std = close.rolling(20).std()
+    lower = mean - 2 * std
+    upper = mean + 2 * std
+    bbp = (close - lower) / (upper - lower)
+    return bbp.reindex(df.index, method='ffill').fillna(0.5)
 
 class DCATrailingStrategy:
-def __init__(
-    self,
-    base_order: float = 16.6078,
-    mult: float = 1.0,
-    max_safety: int = 50,
-    compound: bool = True,
-    risk_pct: float = 0.0166078,
-    spacing_pct: float = 1.0,
-    tp_pct: float = 0.6,
-    trailing: bool = True,
-    trailing_pct: float = 0.1,
-    fee_rate: float = 0.001,
-    initial_balance: float = 1000.0,
-    reopen_sec: Optional[int] = None,
-    use_sig: bool = True,
-    long_only: bool = False,
-    **_ignored,
-):
+    def __init__(
+        self,
+        base_order: float = 16.6078,
+        mult: float = 1.5,
+        max_safety: int = 8,
+        compound: bool = True,
+        risk_pct: float = 0.013085,
+        spacing_pct: float = 0.3,
+        tp_pct: float = 0.6,
+        trailing: bool = True,
+        trailing_pct: float = 0.1,
+        fee_rate: float = 0.001,
+        initial_balance: float = 1000.0,
+        reopen_sec: Optional[int] = None,
+        use_sig: bool = True,
+        long_only: bool = False,
+        **_ignored,
+    ):
         self.base_order = base_order
         self.mult = mult
         self.max_safety = max_safety
@@ -43,38 +89,10 @@ def __init__(
         self.reopen_sec = reopen_sec
         self.long_only = long_only
 
-    # ---------------------------------------------------------------
-    @staticmethod
-    def _supertrend_signal(df: pd.DataFrame) -> pd.Series:
-        tf = "30min"
-        hlc = df.resample(tf).agg(
-            high=("high", "max"),
-            low=("low", "min"),
-            close=("close", "last"),
-        ).dropna()
-
-        atr = AverageTrueRange(hlc["high"], hlc["low"], hlc["close"], window=10).average_true_range()
-        hl2 = (hlc["high"] + hlc["low"]) / 2
-        upper = hl2 + 3 * atr
-        lower = hl2 - 3 * atr
-
-        st = pd.Series(np.nan, index=hlc.index)
-        bull = pd.Series(True, index=hlc.index)
-
-        for i in range(1, len(hlc)):
-            if bull.iat[i - 1]:
-                st.iat[i] = max(lower.iat[i], st.iat[i - 1] if not np.isnan(st.iat[i - 1]) else lower.iat[i])
-                bull.iat[i] = hlc['close'].iat[i] > st.iat[i]
-            else:
-                st.iat[i] = min(upper.iat[i], st.iat[i - 1] if not np.isnan(st.iat[i - 1]) else upper.iat[i])
-                bull.iat[i] = hlc['close'].iat[i] > st.iat[i]
-
-        return bull.reindex(df.index, method="ffill").fillna(False)
-
-    # ---------------------------------------------------------------
     def backtest(self, df: pd.DataFrame, cooldown_sec: int = 60) -> Tuple[List[Tuple], List[Tuple]]:
         df = df.copy()
-        df["bull"] = self._supertrend_signal(df)
+        df["bull"] = _supertrend_signal(df)
+        df["bbp"] = _bb_percent(df)
 
         cash = self.initial_balance
         qty = 0.0
@@ -89,6 +107,7 @@ def __init__(
         cash_start = 0.0
         deal_entry_ts = 0
         last_close_ts = -1
+        prev_bbp = 0.5
 
         deals: List[Tuple] = []
         equity: List[Tuple] = []
@@ -99,16 +118,17 @@ def __init__(
             equity.append((epoch, cash + qty * price))
 
             bull = bool(row.bull)
+            bbp = row.bbp
 
             if state == "idle":
                 if self.long_only:
-                    # Long-only mode: only open when bullish
-                    open_long = bull and self._can_reopen(epoch, last_close_ts)
+                    open_long = bull and (prev_bbp <= 0 < bbp) and self._can_reopen(epoch, last_close_ts)
                     open_short = False
                 else:
-                    open_long = bull and self._can_reopen(epoch, last_close_ts)
-                    open_short = (not bull) and self._can_reopen(epoch, last_close_ts)
+                    open_long = bull and (prev_bbp <= 0 < bbp) and self._can_reopen(epoch, last_close_ts)
+                    open_short = (not bull) and (prev_bbp >= 1 > bbp) and self._can_reopen(epoch, last_close_ts)
                 if not (open_long or open_short):
+                    prev_bbp = bbp
                     continue
 
                 side = 1 if open_long else -1
@@ -131,11 +151,13 @@ def __init__(
                 trailing_extreme = price
                 deal_entry_ts = epoch
                 state = "active"
+                prev_bbp = bbp
                 continue
 
             # ---------- safety orders ----------
             need_safety = (side == 1 and price <= next_order) or (side == -1 and price >= next_order)
-            if state == "active" and need_safety and dca_count < self.max_safety and epoch - deal_entry_ts >= cooldown_sec:
+            bb_condition = (side == 1 and bbp < 0.1) or (side == -1 and bbp > 0.9)
+            if state == "active" and need_safety and bb_condition and dca_count < self.max_safety and epoch - deal_entry_ts >= cooldown_sec:
                 dca_count += 1
                 usd = ladder0 * (self.mult ** dca_count)
                 fee = usd * self.fee_rate
@@ -196,6 +218,8 @@ def __init__(
                 state = "idle"
                 side = 0
                 last_close_ts = epoch
+
+            prev_bbp = bbp
 
         # final equity snapshot
         if equity and equity[-1][0] != int(df.index[-1].timestamp()):

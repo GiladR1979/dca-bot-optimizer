@@ -1,3 +1,4 @@
+# optuna_search.py
 """
 Full‑engine Optuna optimiser – *study names are per‑symbol*.
 """
@@ -14,16 +15,15 @@ import pandas as pd
 # ------------------------------------------------------------------ #
 _seen_params: set[tuple] = set()
 
-def _param_sig(spacing: float, tp: float, trailing: bool, trail_pct: float, sl_pct: float, max_hold: int) -> tuple:  # Updated sig
+def _param_sig(spacing: float, tp: float, trailing: bool, trail_pct: float) -> tuple:
     """Rounded signature so small FP noise does not count as new."""
     return (
         round(spacing, 3),
         round(tp, 3),
         bool(trailing),
         round(trail_pct, 3),
-        round(sl_pct, 3),
-        max_hold,
     )
+
 import sqlalchemy
 import sqlalchemy.pool
 
@@ -40,8 +40,6 @@ def _evaluate(
     tp: float,
     trailing: bool,
     trail_pct: float,
-    sl_pct: float,  # New
-    max_hold: int,  # New
     *,
     use_sig: int,
     reopen_sec: int,
@@ -53,8 +51,6 @@ def _evaluate(
         tp_pct=tp,
         trailing=trailing,
         trailing_pct=trail_pct,
-        stop_loss_pct=sl_pct,  # New
-        max_hold_days=max_hold,  # New
         use_sig=use_sig,
         reopen_sec=reopen_sec,
         long_only=long_only,
@@ -81,11 +77,9 @@ def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reop
         tp = trial.suggest_float("tp_pct", 0.5, 5.0, step=0.1)
         trailing = trial.suggest_categorical("trailing", [True, False])
         trail_pct = 0.1
-        sl_pct = trial.suggest_float("stop_loss_pct", 5, 30, step=1.0)  # New: Optimize SL 5-30%
-        max_hold = trial.suggest_int("max_hold_days", 5, 120, step=5)  # New: Optimize max hold days
 
         # ---- skip exact‑duplicate parameter sets --------------------
-        sig = _param_sig(spacing, tp, trailing, trail_pct, sl_pct, max_hold)
+        sig = _param_sig(spacing, tp, trailing, trail_pct)
         if sig in _seen_params:
             raise optuna.TrialPruned()
         _seen_params.add(sig)
@@ -95,13 +89,13 @@ def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reop
             raise optuna.TrialPruned()
 
         # ---------- fast head‑run for early pruning --------------------
-        m_head = _evaluate(head, spacing, tp, trailing, trail_pct, sl_pct, max_hold, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, exit_on_flip=exit_on_flip)
+        m_head = _evaluate(head, spacing, tp, trailing, trail_pct, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, exit_on_flip=exit_on_flip)
         trial.report(m_head[metric_key], step=0)
         if trial.should_prune():
             raise optuna.TrialPruned()
 
         # ---------- full back‑test ------------------------------------
-        m_full = _evaluate(df_full, spacing, tp, trailing, trail_pct, sl_pct, max_hold, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, exit_on_flip=exit_on_flip)
+        m_full = _evaluate(df_full, spacing, tp, trailing, trail_pct, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, exit_on_flip=exit_on_flip)
         trial.set_user_attr("metrics", m_full)
         trial.set_user_attr(
             "params",
@@ -110,8 +104,6 @@ def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reop
                 "tp_pct": tp,
                 "trailing": trailing,
                 "trailing_pct": trail_pct,
-                "stop_loss_pct": sl_pct,  # New
-                "max_hold_days": max_hold,  # New
             },
         )
         return m_full[metric_key]
@@ -132,8 +124,6 @@ def _register_trials(study: optuna.study.Study):
             t.params.get("tp_pct"),
             t.params.get("trailing"),
             t.params.get("trailing_pct"),
-            t.params.get("stop_loss_pct"),  # New
-            t.params.get("max_hold_days"),  # New
         )
         _seen_params.add(sig)
 
