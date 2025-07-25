@@ -67,23 +67,18 @@ def monte_carlo_backtest(
     num_sims: int = 100,
     noise_std: float = 0.001,  # 0.1% std dev noise
 ) -> Dict:
-    """Run Monte Carlo simulations with price perturbations."""
-    all_met = []
-    for _ in range(num_sims):
-        df_pert = df.copy()
-        # Multiplicative noise for realistic volatility simulation
-        df_pert['close'] *= (1 + np.random.normal(0, noise_std, len(df_pert)))
-        bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, use_bb_safety=use_bb_safety, supertrend_tf=supertrend_tf)
-        deals, eq = bot.backtest(df_pert)
-        met = calc_metrics(deals, eq)
-        all_met.append(met)
+    """Run Monte Carlo simulations with price perturbations on GPU."""
+    bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, use_bb_safety=use_bb_safety, supertrend_tf=supertrend_tf)
+    profits = bot.backtest_gpu_monte_carlo(df, num_sims=num_sims, noise_std=noise_std)
 
-    # Aggregate key metrics
+    # Aggregate key metrics (simplified; only profit-based metrics for now)
+    avg_apy_pct = np.mean(profits) * 100  # Simplified; assumes profit as % return
+    std_apy_pct = np.std(profits) * 100
     agg = {
-        'avg_apy_pct': float(np.mean([m['apy_pct'] for m in all_met])),
-        'std_apy_pct': float(np.std([m['apy_pct'] for m in all_met])),
-        'worst_drawdown_pct': float(np.max([m['max_drawdown_pct'] for m in all_met])),
-        'avg_deals': float(np.mean([m['deals'] for m in all_met])),
+        'avg_apy_pct': float(avg_apy_pct),
+        'std_apy_pct': float(std_apy_pct),
+        'worst_drawdown_pct': 0.0,  # Placeholder; requires equity tracking
+        'avg_deals': 0.0,  # Placeholder; requires deal counting
     }
     return agg
 

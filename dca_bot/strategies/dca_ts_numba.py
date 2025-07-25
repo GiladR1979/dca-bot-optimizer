@@ -1,6 +1,5 @@
-# dca_ts_numba.py
 """
-Numba‑accelerated dual‑side DCA strategy (spot).
+Numba‑accelerated dual‑side DCA strategy (spot) with GPU Monte Carlo support.
 """
 from __future__ import annotations
 from dataclasses import dataclass
@@ -9,6 +8,8 @@ import numba as nb
 import numpy as np
 import pandas as pd
 from numba.typed import List as NbList
+from numba import cuda
+import cupy as cp
 
 
 def _atr(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 10) -> pd.Series:
@@ -101,6 +102,35 @@ class DCAJITStrategy:
         deals = [(int(r[0]), int(r[1]), float(r[2]), float(r[3])) for r in deals_np]
         equity = [(int(r[0]), float(r[1])) for r in eq_np]
         return deals, equity
+
+    def backtest_gpu_monte_carlo(self, df: pd.DataFrame, num_sims: int = 100, noise_std: float = 0.001) -> list:
+        """Run Monte Carlo simulations in parallel on GPU."""
+        # Convert to GPU arrays
+        px = cp.asarray(df['close'].values)
+        ts = cp.asarray(df.index.view('int64') // 1_000_000_000)
+        bb_percent = cp.asarray(_bb_percent(df))
+        bull = cp.asarray(_supertrend(df, self.supertrend_tf))
+
+        # Generate noise on GPU
+        noise = cp.random.normal(0, noise_std, (num_sims, len(px)))
+        px_sims = px * (1 + noise)
+
+        # Launch GPU kernel
+        threads_per_block = 128
+        blocks = (num_sims + threads_per_block - 1) // threads_per_block
+        profits = cp.zeros(num_sims)
+
+        _loop_gpu[blocks, threads_per_block](
+            ts, px_sims, bb_percent, bull,
+            self.spacing_pct, self.tp_pct, int(self.trailing), self.trailing_pct,
+            self.max_safety, self.base_order, self.mult,
+            self.fee_rate, self.initial_balance,
+            self.reopen_sec, int(self.compound), self.risk_pct,
+            int(self.long_only), int(self.exit_on_flip),
+            60, int(self.use_bb_safety), profits
+        )
+
+        return cp.asnumpy(profits).tolist()
 
 
 # ------------------ numba core ------------------
@@ -246,3 +276,143 @@ def _loop(
         prev_bbp = bbp
 
     return deals, equity
+
+
+# ------------------ GPU Monte Carlo kernel ------------------
+@cuda.jit
+def _loop_gpu(
+    ts, px_sims, bb_percent, bull,
+    spacing_pct, tp_pct, trailing_int, trailing_pct,
+    max_safety, base_order, mult,
+    fee_rate, init_cash, reopen_sec,
+    compound_int, risk_pct, long_only_int, exit_on_flip_int,
+    cooldown_sec, use_bb_safety_int, profits
+):
+    sim_idx = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
+    if sim_idx >= px_sims.shape[0]:
+        return
+
+    n = len(ts)
+    cash = init_cash
+    qty = 0.0
+    avg = 0.0
+    side = 0
+    in_trade = False
+    ladder0 = base_order
+    safety_cnt = 0
+    next_order = 0.0
+    trail_ext = 0.0
+    cash_start = 0.0
+    entry_ts = -1
+    last_close = -1e18
+    prev_bbp = 0.5
+    px = px_sims[sim_idx]
+
+    for i in range(n):
+        t = ts[i]
+        p = px[i]
+        bbp = bb_percent[i]
+        is_bull = bull[i]
+
+        if not in_trade:
+            if long_only_int == 1:
+                open_long = is_bull and (prev_bbp <= 0 < bbp) and (reopen_sec == -1 or t >= last_close + reopen_sec)
+                open_short = False
+            else:
+                open_long = is_bull and (prev_bbp <= 0 < bbp) and (reopen_sec == -1 or t >= last_close + reopen_sec)
+                open_short = (not is_bull) and (prev_bbp >= 1 > bbp) and (reopen_sec == -1 or t >= last_close + reopen_sec)
+            if not (open_long or open_short):
+                prev_bbp = bbp
+                continue
+
+            side = 1 if open_long else -1
+            usd = cash * risk_pct if compound_int == 1 else base_order
+            fee = usd * fee_rate
+            qty_change = side * usd / p
+
+            cash_start = cash
+
+            if side == 1:
+                cash -= usd + fee
+            else:
+                cash += usd - fee
+
+            qty += qty_change
+            avg = p
+            ladder0 = usd
+            safety_cnt = 0
+            next_order = p * (1 - spacing_pct / 100) if side == 1 else p * (1 + spacing_pct / 100)
+            trail_ext = p
+            entry_ts = t
+            in_trade = True
+            prev_bbp = bbp
+            continue
+
+        # ------------- safety orders -------------
+        need_safety = (side == 1 and p <= next_order) or (side == -1 and p >= next_order)
+        bb_condition = True if use_bb_safety_int == 0 else ((side == 1 and bbp < 0.1) or (side == -1 and bbp > 0.9))
+        if in_trade and need_safety and bb_condition and safety_cnt < max_safety and (t - entry_ts >= cooldown_sec):
+            safety_cnt += 1
+            usd = ladder0 * (mult ** safety_cnt)
+            fee = usd * fee_rate
+            qty_change = side * usd / p
+
+            if side == 1:
+                cash -= usd + fee
+            else:
+                cash += usd - fee
+
+            qty_old = qty
+            qty += qty_change
+            avg = (avg * abs(qty_old) + p * abs(qty_change)) / abs(qty)
+            next_order = p * (1 - spacing_pct / 100) if side == 1 else p * (1 + spacing_pct / 100)
+            trail_ext = p
+            entry_ts = t
+
+        # ------------- TP / trailing -------------
+        tp_target = avg * (1 + tp_pct / 100) if side == 1 else avg * (1 - tp_pct / 100)
+        tp_hit = (side == 1 and p >= tp_target) or (side == -1 and p <= tp_target)
+        exit_now = False
+        if tp_hit:
+            if trailing_int == 1:
+                if side == 1:
+                    if p > trail_ext:
+                        trail_ext = p
+                    if p <= trail_ext * (1 - trailing_pct / 100):
+                        exit_now = True
+                else:
+                    if p < trail_ext:
+                        trail_ext = p
+                    if p >= trail_ext * (1 + trailing_pct / 100):
+                        exit_now = True
+            else:
+                exit_now = True
+
+        # trend flip using Supertrend
+        trend_flip = (side == 1 and not is_bull) or (side == -1 and is_bull)
+        if exit_on_flip_int and trend_flip:
+            exit_now = True
+
+        # ------------- close -------------
+        if exit_now:
+            if side == 1:
+                proceeds = abs(qty) * p
+                fee = proceeds * fee_rate
+                cash += proceeds - fee
+            else:
+                buy_cost = abs(qty) * p
+                fee = buy_cost * fee_rate
+                cash -= buy_cost + fee
+
+            profit = cash - cash_start
+            deals.append(np.array((entry_ts, t, profit, fee), dtype=np.float64))
+
+            qty = 0.0
+            avg = 0.0
+            in_trade = False
+            side = 0
+            last_close = t
+
+        prev_bbp = bbp
+
+    profits[sim_idx] = cash - init_cash

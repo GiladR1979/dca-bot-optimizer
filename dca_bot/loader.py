@@ -1,4 +1,3 @@
-# loader.py
 """
 Binance downloader with local caching.
 
@@ -61,11 +60,22 @@ def _klines(symbol: str,
     cur = start_ms
     # Resume from temp if exists
     if temp_file and os.path.exists(temp_file):
-        with open(temp_file, 'rb') as f:
-            data = pickle.load(f)
-        if data:
-            cur = data[-1][0] + 1
-            log.info(f"Resuming download from temp file, current cur: {datetime.utcfromtimestamp(cur / 1000)}")
+        try:
+            with open(temp_file, 'rb') as f:
+                data = pickle.load(f)
+            if data:
+                cur = data[-1][0] + 1
+                log.info(f"Resuming download from temp file, current cur: %s", datetime.utcfromtimestamp(cur / 1000))
+            else:
+                log.warning(f"Empty temp file %s, starting over", temp_file)
+                data = []
+                cur = start_ms
+                os.remove(temp_file)
+        except (EOFError, pickle.UnpicklingError):
+            log.warning(f"Corrupt temp file %s, starting over", temp_file)
+            data = []
+            cur = start_ms
+            os.remove(temp_file)
 
     while cur < end_ms:
         try:

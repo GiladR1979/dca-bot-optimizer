@@ -30,7 +30,7 @@ $coins = @(
 $commonFlags = @(
     "--interval", "1s"                   #interval for downloading from Binance
     "--trials",  "600",
-    "--jobs",    "0",                     # 0 = run jobs sequentially
+    "--jobs",    "12",                     # 0 = run jobs sequentially
     "-v"                                   # verbose logs
 )
 
@@ -53,7 +53,7 @@ foreach ($c in $coins) {
         "--long-only", "1"
         "--no-flip-exit", "0"
         "--no-bb-safety",
-        "--supertrend-tf", "30m"
+        "--supertrend-tf", "30min"
     ) + $commonFlags
 
     & $pythonExe @args
