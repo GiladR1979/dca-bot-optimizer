@@ -29,8 +29,8 @@ $coins = @(
 # ------------------------------------------------------------------
 $commonFlags = @(
     "--interval", "1s"                   #interval for downloading from Binance
-    "--trials",  "400",
-    "--jobs",    "8",                     # 0 = run jobs sequentially
+    "--trials",  "600",
+    "--jobs",    "0",                     # 0 = run jobs sequentially
     "-v"                                   # verbose logs
 )
 
@@ -52,7 +52,8 @@ foreach ($c in $coins) {
         "--reopen-sec", "60"        # reopen 60 s after previous exit
         "--long-only", "1"
         "--no-flip-exit", "0"
-        "--no-bb-safety"
+        "--no-bb-safety",
+        "--supertrend-tf", "30m"
     ) + $commonFlags
 
     & $pythonExe @args
