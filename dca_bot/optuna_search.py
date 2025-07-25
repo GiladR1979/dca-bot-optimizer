@@ -82,7 +82,7 @@ def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reop
     def _objective(trial: optuna.Trial):
         spacing = trial.suggest_float("spacing_pct", 0.3, 9.0, step=0.1)
         tp = trial.suggest_float("tp_pct", 0.5, 5.0, step=0.1)
-        trailing = trial.suggest_categorical("trailing", [False, True])  # Fixed: Standardized order to [False, True] for distribution compatibility
+        trailing = trial.suggest_categorical("trailing", [False, True])  # Standardized order
         trail_pct = 0.1
 
         # ---- skip exact‑duplicate parameter sets --------------------
@@ -126,11 +126,14 @@ def _register_trials(study: optuna.study.Study):
     for t in study.trials:
         if t.state != optuna.trial.TrialState.COMPLETE:
             continue
+        # Skip if missing required params
+        if 'spacing_pct' not in t.params or 'tp_pct' not in t.params or 'trailing' not in t.params:
+            continue
         sig = _param_sig(
             t.params.get("spacing_pct"),
             t.params.get("tp_pct"),
             t.params.get("trailing"),
-            t.params.get("trailing_pct"),
+            t.params.get("trailing_pct") or 0.1  # Default if missing
         )
         _seen_params.add(sig)
 
@@ -225,13 +228,41 @@ def run_best_study(
         params_cp = cp.array([[p['spacing_pct'], p['tp_pct'], 1 if p['trailing'] else 0, p['trailing_pct']] for p in params_list])
 
         outputs = cp.zeros((len(params_list), 5))
-        threads = 128
-        blocks = (len(params_list) + threads - 1) // threads
-        _grid_gpu[blocks, threads](ts_cp, px_cp, bb_cp, bull_cp, params_cp, outputs)
+
+        # Dynamic launch config for better occupancy
+        sm_count = cuda.get_current_device().MULTIPROCESSOR_COUNT
+        min_blocks = max(1, 2 * sm_count)  # Aim for at least 2x SMs
+        threads_per_block = max(32, min(256, (len(params_list) + min_blocks - 1) // min_blocks))  # Adjust threads to create more blocks
+        blocks = (len(params_list) + threads_per_block - 1) // threads_per_block
+
+        _grid_gpu[blocks, threads_per_block](ts_cp, px_cp, bb_cp, bull_cp, params_cp, outputs)
         outputs_np = cp.asnumpy(outputs)
 
+        # Move exp calculation before the print loop
         days_span = max((df.index[-1] - df.index[0]).total_seconds() / 86400, 1)
         exp = 365 / days_span
+
+        # Collect GPU results for sorting
+        gpu_results = []
+        for idx, p in enumerate(params_list):
+            row = outputs_np[idx]
+            ratio = row[0]
+            apy = (ratio ** exp - 1) * 100 if ratio >= 0 else float(np.real((complex(ratio) ** exp - 1))) * 100
+            gpu_results.append({
+                'params': p,
+                'apy': apy,
+                'ratio': ratio,
+                'max_drawdown': row[1],
+                'avg_deal_min': row[2],
+                'deals': row[3],
+                'longest_dd_min': row[4]
+            })
+
+        # Sort by APY descending and print top 10
+        gpu_results_sorted = sorted(gpu_results, key=lambda x: x['apy'], reverse=True)
+        print("\nTop 10 GPU Trial Results (sorted by APY):")
+        for res in gpu_results_sorted[:10]:
+            print(f"Params: {res['params']}, APY: {res['apy']:.2f}%, Ratio: {res['ratio']:.2f}, Max Drawdown: {res['max_drawdown']:.2f}%, Avg Deal Min: {res['avg_deal_min']:.2f}, Deals: {int(res['deals'])}, Longest DD Min: {res['longest_dd_min']:.2f}")
 
         for idx, p in enumerate(params_list):
             row = outputs_np[idx]
