@@ -1,3 +1,4 @@
+# loader.py
 """
 Binance downloader with local caching.
 
@@ -43,7 +44,7 @@ def _klines(symbol: str,
                 total=5,
                 backoff_factor=1.5,                # 1.5 s, 3 s, 4.5 s …
                 status_forcelist=[429, 500, 502, 503, 504],
-                allowed_methods=["GET"],
+                method_whitelist=["GET"],  # Changed for compatibility
             )
         ),
     )

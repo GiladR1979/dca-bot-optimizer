@@ -1,4 +1,3 @@
-# optuna_search.py
 """
 Full‑engine Optuna optimiser – *study names are per‑symbol*.
 """
@@ -9,6 +8,10 @@ from typing import Optional, Dict, Tuple
 
 import optuna
 import pandas as pd
+import numpy as np
+import cupy as cp
+from optuna.trial import TrialState
+from numba import cuda
 
 # ------------------------------------------------------------------ #
 #  duplicate‑trial guard (Optuna 2.x)                                #
@@ -27,7 +30,7 @@ def _param_sig(spacing: float, tp: float, trailing: bool, trail_pct: float) -> t
 import sqlalchemy
 import sqlalchemy.pool
 
-from .strategies.dca_ts_numba import DCAJITStrategy as DCATrailingStrategy
+from .strategies.dca_ts_numba import DCAJITStrategy as DCATrailingStrategy, _bb_percent, _supertrend, _grid_gpu
 from .simulator import calc_metrics
 
 # ------------------------------------------------------------------ #
@@ -79,7 +82,7 @@ def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reop
     def _objective(trial: optuna.Trial):
         spacing = trial.suggest_float("spacing_pct", 0.3, 9.0, step=0.1)
         tp = trial.suggest_float("tp_pct", 0.5, 5.0, step=0.1)
-        trailing = trial.suggest_categorical("trailing", [True, False])
+        trailing = trial.suggest_categorical("trailing", [False, True])  # Fixed: Standardized order to [False, True] for distribution compatibility
         trail_pct = 0.1
 
         # ---- skip exact‑duplicate parameter sets --------------------
@@ -185,8 +188,83 @@ def run_best_study(
     use_bb_safety: bool = True,
     window_id: str = "",
     supertrend_tf: str = "30min",
+    use_gpu: bool = False,
 ):
     study_best = _new_study("dca_best", "maximize", storage, symbol, window_id)
+    if use_gpu:
+        import itertools
+        # Generate grids with exact rounding to avoid FP precision issues
+        spacing_list = [round(0.3 + 0.1 * i, 1) for i in range(int((9.0 - 0.3) / 0.1) + 1)]
+        tp_list = [round(0.5 + 0.1 * i, 1) for i in range(int((5.0 - 0.5) / 0.1) + 1)]
+        grid = {
+            "spacing_pct": spacing_list,
+            "tp_pct": tp_list,
+            "trailing": [True, False],
+            "trailing_pct": [0.1],
+        }
+        params_list = []
+        for combo in itertools.product(*grid.values()):
+            p = dict(zip(grid.keys(), combo))
+            if p["trailing"] and p["tp_pct"] - p["trailing_pct"] < 0.5:
+                continue
+            if not p["trailing"] and p["tp_pct"] < 0.5:
+                continue
+            params_list.append(p)
+
+        # GPU batch evaluate
+        ts = df.index.astype('datetime64[s]').astype(np.int64)
+        px = df['close'].values
+        bb = _bb_percent(df)
+        bu = _supertrend(df, supertrend_tf)
+
+        ts_cp = cp.asarray(ts)
+        px_cp = cp.asarray(px)
+        bb_cp = cp.asarray(bb)
+        bull_cp = cp.asarray(bu)
+
+        params_cp = cp.array([[p['spacing_pct'], p['tp_pct'], 1 if p['trailing'] else 0, p['trailing_pct']] for p in params_list])
+
+        outputs = cp.zeros((len(params_list), 5))
+        threads = 128
+        blocks = (len(params_list) + threads - 1) // threads
+        _grid_gpu[blocks, threads](ts_cp, px_cp, bb_cp, bull_cp, params_cp, outputs)
+        outputs_np = cp.asnumpy(outputs)
+
+        days_span = max((df.index[-1] - df.index[0]).total_seconds() / 86400, 1)
+        exp = 365 / days_span
+
+        for idx, p in enumerate(params_list):
+            row = outputs_np[idx]
+            ratio = row[0]
+            apy = (ratio ** exp - 1) * 100 if ratio >= 0 else float(np.real((complex(ratio) ** exp - 1))) * 100
+            m = {
+                "deals": row[3],
+                "total_pl": round((ratio - 1) * 1000, 2),
+                "roi_pct": round((ratio - 1) * 100, 2),
+                "annual_pct": round(apy, 2),
+                "apy_pct": round(apy, 2),
+                "annual_usd": round(1000 * apy / 100, 2),
+                "avg_deal_min": round(row[2], 2),
+                "max_drawdown_pct": round(row[1], 2),
+                "longest_drawdown_min": round(row[4], 2),
+            }
+            trial = optuna.create_trial(
+                value= m['annual_pct'],
+                params={
+                    'spacing_pct': round(p['spacing_pct'], 1),
+                    'tp_pct': round(p['tp_pct'], 1),
+                    'trailing': p['trailing'],
+                },
+                distributions={
+                    'spacing_pct': optuna.distributions.FloatDistribution(0.3, 9.0, step=0.1),
+                    'tp_pct': optuna.distributions.FloatDistribution(0.5, 5.0, step=0.1),
+                    'trailing': optuna.distributions.CategoricalDistribution([False, True]),
+                },
+                state=TrialState.COMPLETE,
+                user_attrs={'params': p, 'metrics': m}
+            )
+            study_best.add_trial(trial)
+
     study_best.optimize(
         make_objective(df, "annual_pct", use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, exit_on_flip=exit_on_flip, use_bb_safety=use_bb_safety, supertrend_tf=supertrend_tf),
         n_trials=n_trials,

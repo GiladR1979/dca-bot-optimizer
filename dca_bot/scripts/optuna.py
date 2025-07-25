@@ -69,16 +69,25 @@ def monte_carlo_backtest(
 ) -> Dict:
     """Run Monte Carlo simulations with price perturbations on GPU."""
     bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, use_bb_safety=use_bb_safety, supertrend_tf=supertrend_tf)
-    profits = bot.backtest_gpu_monte_carlo(df, num_sims=num_sims, noise_std=noise_std)
+    results = bot.backtest_gpu_monte_carlo(df, num_sims=num_sims, noise_std=noise_std)
 
-    # Aggregate key metrics (simplified; only profit-based metrics for now)
-    avg_apy_pct = np.mean(profits) * 100  # Simplified; assumes profit as % return
-    std_apy_pct = np.std(profits) * 100
+    ratios = results[:, 0]
+    max_dds = results[:, 1]
+    avg_deal_mins = results[:, 2]
+    num_dealss = results[:, 3]
+    longest_dds = results[:, 4]
+
+    days_span = max((df.index[-1] - df.index[0]).total_seconds() / 86400, 1)
+    exp = 365 / days_span
+    apys = (ratios ** exp - 1) * 100
+
     agg = {
-        'avg_apy_pct': float(avg_apy_pct),
-        'std_apy_pct': float(std_apy_pct),
-        'worst_drawdown_pct': 0.0,  # Placeholder; requires equity tracking
-        'avg_deals': 0.0,  # Placeholder; requires deal counting
+        'avg_apy_pct': float(np.mean(apys)),
+        'std_apy_pct': float(np.std(apys)),
+        'avg_drawdown_pct': float(np.mean(max_dds)),
+        'worst_drawdown_pct': float(np.max(max_dds)),
+        'avg_deals': float(np.mean(num_dealss)),
+        'avg_deal_min': float(np.mean(avg_deal_mins)),
     }
     return agg
 
@@ -119,9 +128,11 @@ def main() -> None:
                     help="Supertrend timeframe (e.g., 30min, 1h, default: 30min)")
     pa.add_argument("--interval", type=str, default="1m",
                     help="Candle timeframe for download (e.g., 1s, 1m, 5m, default: 1m)")
+    pa.add_argument("--use-gpu", action="store_true",
+                    help="Use GPU for optimization by evaluating a grid in parallel")
 
     pa.add_argument("-v", "--verbose", action="store_true")
-    args = pa.parse_args()
+    args = pa.parse_args()  # Fixed: Changed from add_argument() to parse_args()
 
     if args.storage.lower() == "none":
         args.storage = None
@@ -158,6 +169,7 @@ def main() -> None:
             use_bb_safety=use_bb_safety,
             window_id="",  # No window ID for full
             supertrend_tf=supertrend_tf,
+            use_gpu=args.use_gpu,
         )
 
         def _pick(study):
@@ -207,6 +219,7 @@ def main() -> None:
                 use_bb_safety=use_bb_safety,
                 window_id=window_id,
                 supertrend_tf=supertrend_tf,
+                use_gpu=args.use_gpu,
             )
 
             def _pick(study):
