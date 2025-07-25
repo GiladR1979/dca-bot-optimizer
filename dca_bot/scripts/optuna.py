@@ -1,4 +1,3 @@
-# optuna.py
 """
 CLI – runs BEST Optuna study, computes optimal parameters, and generates a graph.
 
@@ -10,6 +9,7 @@ New flags
 --no-flip-exit {0,1} 1 = disable Supertrend flip exits (exit only on TP/trailing), 0 = keep flip exits (default)
 --no-bb-safety  Disable BB condition for safety orders, use constant spacing only
 --supertrend-tf  Supertrend timeframe (e.g., 30min, 1h, default: 30min)
+--interval INTERVAL  Candle timeframe for download (e.g., 1s, 1m, 5m, default: 1m)
 """
 
 import argparse
@@ -122,6 +122,8 @@ def main() -> None:
                     help="Disable BB condition for safety orders, use constant spacing only")
     pa.add_argument("--supertrend-tf", type=str, default="30min",
                     help="Supertrend timeframe (e.g., 30min, 1h, default: 30min)")
+    pa.add_argument("--interval", type=str, default="1m",
+                    help="Candle timeframe for download (e.g., 1s, 1m, 5m, default: 1m)")
 
     pa.add_argument("-v", "--verbose", action="store_true")
     args = pa.parse_args()
@@ -135,7 +137,7 @@ def main() -> None:
     )
 
     # ------------------------------------------------ load candles
-    df = load_binance(args.symbol, args.start, args.end, "1m")
+    df = load_binance(args.symbol, args.start, args.end, args.interval)
     if df.empty:
         sys.exit("No candles returned – check date range.")
     df = df.sort_index()  # Ensure sorted by time
