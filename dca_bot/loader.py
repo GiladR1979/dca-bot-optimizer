@@ -14,6 +14,7 @@ from datetime import datetime
 
 import pandas as pd
 import requests
+import pickle
 
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
@@ -21,14 +22,14 @@ os.makedirs(DATA_DIR, exist_ok=True)
 log = logging.getLogger("loader")
 
 
-import requests
 from requests.adapters import HTTPAdapter, Retry
 
 def _klines(symbol: str,
             start_ms: int,
             end_ms: int,
             interval: str = "1m",
-            callback=None):
+            callback=None,
+            temp_file: str = None):
     """
     Fetch up to 1000 klines in one call with automatic retries and
     exponential back‑off.  Raises after 5 failed attempts.
@@ -56,7 +57,16 @@ def _klines(symbol: str,
         "limit": 1000,
     }
 
-    data, cur = [], start_ms
+    data = []
+    cur = start_ms
+    # Resume from temp if exists
+    if temp_file and os.path.exists(temp_file):
+        with open(temp_file, 'rb') as f:
+            data = pickle.load(f)
+        if data:
+            cur = data[-1][0] + 1
+            log.info(f"Resuming download from temp file, current cur: {datetime.utcfromtimestamp(cur / 1000)}")
+
     while cur < end_ms:
         try:
             r = session.get(url, params={**params, "startTime": cur}, timeout=30)
@@ -88,7 +98,14 @@ def _klines(symbol: str,
         # Call the callback if provided
         if callback:
             callback(len(data), len(batch), datetime.utcfromtimestamp(batch[-1][0] / 1000))
+        # Save partial to temp
+        if temp_file:
+            with open(temp_file, 'wb') as f:
+                pickle.dump(data, f)
         time.sleep(0.03)
+    # Clean up temp at end
+    if temp_file and os.path.exists(temp_file):
+        os.remove(temp_file)
     return data
 
 
@@ -146,20 +163,22 @@ def load_binance(symbol, start, end, interval="1m", callback=None):
     frames = [cached]
     if need_front:
         log.info("Downloading front gap: %s → %s", start_dt, have_start)
+        temp_front = cache_file + ".front.temp"
         rs = _klines(symbol,
                      int(start_dt.timestamp()*1000),
                      int((have_start - pd.Timedelta("1ms")).timestamp()*1000)
                      if have_start else int(end_dt.timestamp()*1000),
-                     interval, callback=callback)
+                     interval, callback=callback, temp_file=temp_front)
         if rs:
             frames.append(_to_df(rs))
     if need_back:
         log.info("Downloading back gap : %s → %s", have_end, end_dt)
+        temp_back = cache_file + ".back.temp"
         rs = _klines(symbol,
                      int((have_end + pd.Timedelta("1ms")).timestamp()*1000)
                      if have_end else int(start_dt.timestamp()*1000),
                      int(end_dt.timestamp()*1000),
-                     interval, callback=callback)
+                     interval, callback=callback, temp_file=temp_back)
         if rs:
             frames.append(_to_df(rs))
 
