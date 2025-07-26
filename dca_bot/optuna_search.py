@@ -1,3 +1,4 @@
+# optuna_search.py
 """
 Full‑engine Optuna optimiser – *study names are per‑symbol*.
 """
@@ -280,7 +281,7 @@ def run_best_study(
                 "longest_drawdown_min": round(row[4], 2),
             }
             trial = optuna.create_trial(
-                value= m['annual_pct'],
+                value=m['annual_pct'],
                 params={
                     'spacing_pct': round(p['spacing_pct'], 1),
                     'tp_pct': round(p['tp_pct'], 1),

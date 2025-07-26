@@ -29,8 +29,9 @@ $coins = @(
 # ------------------------------------------------------------------
 $commonFlags = @(
     "--interval", "1s"                   #interval for downloading from Binance
-    "--trials",  "120",
+    "--trials",  "1",
     "--jobs",    "8",                     # 0 = run jobs sequentially
+    "--storage", "none",                  # In-memory mode
     "--use-gpu",
     "-v"                                   # verbose logs
 )

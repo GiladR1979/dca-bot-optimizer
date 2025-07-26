@@ -1,17 +1,3 @@
-"""
-CLI – runs BEST Optuna study, computes optimal parameters, and generates a graph.
-
-New flags
----------
---use-sig    1 (default) = wait for Bollinger+RSI trigger
-             0           = ignore trigger
---reopen-sec N   Seconds to wait after a deal closes when --use-sig is 0
---no-flip-exit {0,1} 1 = disable Supertrend flip exits (exit only on TP/trailing), 0 = keep flip exits (default)
---no-bb-safety  Disable BB condition for safety orders, use constant spacing only
---supertrend-tf  Supertrend timeframe (e.g., 30min, 1h, default: 30min)
---interval INTERVAL  Candle timeframe for download (e.g., 1s, 1m, 5m, default: 1m)
-"""
-
 import argparse
 import json
 import logging
@@ -21,10 +7,11 @@ from typing import Dict, Tuple
 import numpy as np
 from dateutil.relativedelta import relativedelta
 import pandas as pd
+import cupy as cp
 
 from ..loader import load_binance
 from ..optuna_search import run_best_study
-from ..strategies.dca_ts_numba import DCAJITStrategy as DCATrailingStrategy
+from ..strategies.dca_ts_numba import DCAJITStrategy as DCATrailingStrategy, _bb_percent, _supertrend, _loop_gpu
 from ..simulator import calc_metrics
 from ..plotting import equity_curve
 
@@ -64,13 +51,39 @@ def monte_carlo_backtest(
     exit_on_flip: bool = True,
     use_bb_safety: bool = True,
     supertrend_tf: str = "30min",
-    num_sims: int = 100,
+    num_sims: int = 50,  # Reduced from 100
     noise_std: float = 0.001,  # 0.1% std dev noise
 ) -> Dict:
-    """Run Monte Carlo simulations with price perturbations on GPU."""
+    """Run Monte Carlo simulations with price perturbations on GPU, in batches to avoid OOM."""
     bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, use_bb_safety=use_bb_safety, supertrend_tf=supertrend_tf)
-    results = bot.backtest_gpu_monte_carlo(df, num_sims=num_sims, noise_std=noise_std)
+    batch_size = 20  # Process 20 sims per batch to reduce memory usage
+    all_results = []
 
+    px = cp.asarray(df['close'].values, dtype=cp.float32)  # Use float32 to halve memory
+    ts = cp.asarray(df.index.view('int64') // 1_000_000_000)
+    bb_percent = cp.asarray(_bb_percent(df))
+    bull = cp.asarray(_supertrend(df, supertrend_tf))
+
+    for i in range(0, num_sims, batch_size):
+        current_batch = min(batch_size, num_sims - i)
+        noise = cp.random.normal(0, noise_std, (current_batch, len(px)), dtype=cp.float32)
+        px_sims = px * (1 + noise)
+        results_batch = cp.zeros((current_batch, 5))  # ratio, max_dd, avg_deal, num_deals, longest_dd_min
+        threads_per_block = 128
+        blocks = (current_batch + threads_per_block - 1) // threads_per_block
+        _loop_gpu[blocks, threads_per_block](
+            ts, px_sims, bb_percent, bull,
+            params['spacing_pct'], params['tp_pct'], int(params['trailing']), params['trailing_pct'],
+            bot.max_safety, bot.base_order, bot.mult,
+            bot.fee_rate, bot.initial_balance,
+            bot.reopen_sec, int(bot.compound), bot.risk_pct,
+            int(bot.long_only), int(exit_on_flip),
+            60, int(use_bb_safety), results_batch
+        )
+        all_results.append(cp.asnumpy(results_batch))
+        del noise, px_sims, results_batch  # Free memory
+
+    results = np.concatenate(all_results, axis=0)
     ratios = results[:, 0]
     max_dds = results[:, 1]
     avg_deal_mins = results[:, 2]
@@ -78,8 +91,7 @@ def monte_carlo_backtest(
     longest_dds = results[:, 4]
 
     days_span = max((df.index[-1] - df.index[0]).total_seconds() / 86400, 1)
-    exp = 365 / days_span
-    apys = (ratios ** exp - 1) * 100
+    apys = (ratios ** (365 / days_span) - 1) * 100
 
     agg = {
         'avg_apy_pct': float(np.mean(apys)),
@@ -89,6 +101,8 @@ def monte_carlo_backtest(
         'avg_deals': float(np.mean(num_dealss)),
         'avg_deal_min': float(np.mean(avg_deal_mins)),
     }
+    cp.get_default_memory_pool().free_all_blocks()
+
     return agg
 
 # -------------------------------------------------------------------- main CLI
@@ -132,7 +146,7 @@ def main() -> None:
                     help="Use GPU for optimization by evaluating a grid in parallel")
 
     pa.add_argument("-v", "--verbose", action="store_true")
-    args = pa.parse_args()  # Fixed: Changed from add_argument() to parse_args()
+    args = pa.parse_args()
 
     if args.storage.lower() == "none":
         args.storage = None
