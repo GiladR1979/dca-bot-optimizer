@@ -1,4 +1,5 @@
-# dca_ts_numba.py
+# dca_ts_numba.py (modified)
+
 """
 Numba‑accelerated dual‑side DCA strategy (spot) with GPU Monte Carlo support.
 """
@@ -23,13 +24,13 @@ def _atr(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 10) ->
     return atr
 
 
-def _bb_percent(df: pd.DataFrame) -> np.ndarray:
-    ohlc_3m = df.resample("3min").agg(
+def _bb_percent(df: pd.DataFrame, tf: str = "3min") -> np.ndarray:
+    ohlc = df.resample(tf).agg(
         high=("high", "max"),
         low=("low", "min"),
         close=("close", "last"),
     ).dropna()
-    close = ohlc_3m['close']
+    close = ohlc['close']
     mean = close.rolling(20).mean()
     std = close.rolling(20).std()
     lower = mean - 2 * std
@@ -78,13 +79,14 @@ class DCAJITStrategy:
     reopen_sec: int = -1
     long_only: bool = False
     exit_on_flip: bool = True
+    bb_tf: str = "3min"
     use_bb_safety: bool = True
     supertrend_tf: str = "30min"
 
     def backtest(self, df: pd.DataFrame) -> Tuple[List[Tuple], List[Tuple]]:
         px = df['close'].to_numpy(np.float64)
         ts = df.index.view('int64') // 1_000_000_000
-        bb_percent = _bb_percent(df)
+        bb_percent = _bb_percent(df, self.bb_tf)
         bull = _supertrend(df, self.supertrend_tf)
 
         deals_np, eq_np = _loop(
@@ -109,7 +111,7 @@ class DCAJITStrategy:
         # Convert to GPU arrays
         px = cp.asarray(df['close'].values)
         ts = cp.asarray(df.index.view('int64') // 1_000_000_000)
-        bb_percent = cp.asarray(_bb_percent(df))
+        bb_percent = cp.asarray(_bb_percent(df, self.bb_tf))
         bull = cp.asarray(_supertrend(df, self.supertrend_tf))
 
         # Generate noise on GPU
@@ -137,24 +139,31 @@ class DCAJITStrategy:
 # ------------------ numba core ------------------
 @nb.njit(cache=True)
 def _loop(
-    ts: np.ndarray, px: np.ndarray, bb_percent: np.ndarray, bull: np.ndarray,
-    spacing_pct: float, tp_pct: float, trailing_int: int, trailing_pct: float,
-    max_safety: int, base_order: float, mult: float,
-    fee_rate: float, init_cash: float,
-    reopen_sec: int, compound_int: int, risk_pct: float,
-    long_only_int: int,
-    exit_on_flip_int: int,
-    cooldown_sec: int,
-    use_bb_safety_int: int
+        ts: np.ndarray, px: np.ndarray, bb_percent: np.ndarray, bull: np.ndarray,
+        spacing_pct: float, tp_pct: float, trailing_int: int, trailing_pct: float,
+        max_safety: int, base_order: float, mult: float,
+        fee_rate: float, init_cash: float,
+        reopen_sec: int, compound_int: int, risk_pct: float,
+        long_only_int: int,
+        exit_on_flip_int: int,
+        cooldown_sec: int,
+        use_bb_safety_int: int
 ):
     n = len(px)
+    peak = init_cash
+    max_dd = 0.0
+    current_len = 0
+    max_len = 0
+    sum_dur = 0.0
+    num_deals = 0
+
     deals = NbList.empty_list(nb.float64[:])
     equity = NbList.empty_list(nb.float64[:])
 
     cash = init_cash
     qty = 0.0
     avg = 0.0
-    side = 0     # 0 idle, +1 long, −1 short
+    side = 0  # 0 idle, +1 long, −1 short
     in_trade = False
     ladder0 = base_order
     safety_cnt = 0
@@ -171,6 +180,17 @@ def _loop(
         eq = cash + qty * p
         equity.append(np.array((t, eq), dtype=np.float64))
 
+        if eq > peak:
+            peak = eq
+            current_len = 0
+        else:
+            dd = (peak - eq) / peak * 100
+            if dd > max_dd:
+                max_dd = dd
+            current_len += 1
+            if current_len > max_len:
+                max_len = current_len
+
         bbp = bb_percent[i]
         is_bull = bull[i]
 
@@ -181,7 +201,8 @@ def _loop(
                 open_short = False
             else:
                 open_long = is_bull and (prev_bbp <= 0 < bbp) and (reopen_sec == -1 or t >= last_close + reopen_sec)
-                open_short = (not is_bull) and (prev_bbp >= 1 > bbp) and (reopen_sec == -1 or t >= last_close + reopen_sec)
+                open_short = (not is_bull) and (prev_bbp >= 1 > bbp) and (
+                            reopen_sec == -1 or t >= last_close + reopen_sec)
             if not (open_long or open_short):
                 prev_bbp = bbp
                 continue
@@ -268,6 +289,10 @@ def _loop(
             profit = cash - cash_start
             deals.append(np.array((entry_ts, t, profit, fee), dtype=np.float64))
 
+            dur_min = (t - entry_ts) / 60.0
+            sum_dur += dur_min
+            num_deals += 1
+
             qty = 0.0
             avg = 0.0
             in_trade = False
@@ -278,16 +303,26 @@ def _loop(
 
     return deals, equity
 
+    final_eq = cash + qty * px[n - 1]
+    ratio = final_eq / init_cash
+    avg_deal = sum_dur / num_deals if num_deals > 0 else 0.0
+
+    results[sim_idx, 0] = ratio
+    results[sim_idx, 1] = max_dd
+    results[sim_idx, 2] = avg_deal
+    results[sim_idx, 3] = num_deals
+    results[sim_idx, 4] = max_len
+
 
 # ------------------ GPU Monte Carlo kernel ------------------
 @cuda.jit
 def _loop_gpu(
-    ts, px_sims, bb_percent, bull,
-    spacing_pct, tp_pct, trailing_int, trailing_pct,
-    max_safety, base_order, mult,
-    fee_rate, init_cash, reopen_sec,
-    compound_int, risk_pct, long_only_int, exit_on_flip_int,
-    cooldown_sec, use_bb_safety_int, results
+        ts, px_sims, bb_percent, bull,
+        spacing_pct, tp_pct, trailing_int, trailing_pct,
+        max_safety, base_order, mult,
+        fee_rate, init_cash, reopen_sec,
+        compound_int, risk_pct, long_only_int, exit_on_flip_int,
+        cooldown_sec, use_bb_safety_int, results
 ):
     sim_idx = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
     if sim_idx >= px_sims.shape[0]:
@@ -341,7 +376,8 @@ def _loop_gpu(
                 open_short = False
             else:
                 open_long = is_bull and (prev_bbp <= 0 < bbp) and (reopen_sec == -1 or t >= last_close + reopen_sec)
-                open_short = (not is_bull) and (prev_bbp >= 1 > bbp) and (reopen_sec == -1 or t >= last_close + reopen_sec)
+                open_short = (not is_bull) and (prev_bbp >= 1 > bbp) and (
+                            reopen_sec == -1 or t >= last_close + reopen_sec)
             if not (open_long or open_short):
                 prev_bbp = bbp
                 continue
@@ -437,7 +473,7 @@ def _loop_gpu(
 
         prev_bbp = bbp
 
-    final_eq = cash + qty * px[n-1]
+    final_eq = cash + qty * px[n - 1]
     ratio = final_eq / init_cash
     avg_deal = sum_dur / num_deals if num_deals > 0 else 0.0
 
@@ -451,8 +487,8 @@ def _loop_gpu(
 # ------------------ GPU Grid kernel ------------------
 @cuda.jit
 def _grid_gpu(
-    ts, px, bb_percent, bull,
-    params, results
+        ts, px, bb_arrays, bull_arrays,
+        params, results
 ):
     param_idx = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
     if param_idx >= params.shape[0]:
@@ -462,6 +498,9 @@ def _grid_gpu(
     tp_pct = params[param_idx, 1]
     trailing_int = int(params[param_idx, 2])
     trailing_pct = params[param_idx, 3]
+    exit_on_flip_int = int(params[param_idx, 4])
+    bb_idx = int(params[param_idx, 5])
+    st_idx = int(params[param_idx, 6])
 
     n = len(ts)
     cash = 1000.0  # fixed initial_balance
@@ -493,9 +532,11 @@ def _grid_gpu(
     compound_int = 1
     risk_pct = 0.013085
     long_only_int = 0
-    exit_on_flip_int = 1
     cooldown_sec = 60
     use_bb_safety_int = 1
+
+    bb_percent = bb_arrays[bb_idx]
+    bull = bull_arrays[st_idx]
 
     for i in range(n):
         t = ts[i]
@@ -522,7 +563,8 @@ def _grid_gpu(
                 open_short = False
             else:
                 open_long = is_bull and (prev_bbp <= 0 < bbp) and (reopen_sec == -1 or t >= last_close + reopen_sec)
-                open_short = (not is_bull) and (prev_bbp >= 1 > bbp) and (reopen_sec == -1 or t >= last_close + reopen_sec)
+                open_short = (not is_bull) and (prev_bbp >= 1 > bbp) and (
+                            reopen_sec == -1 or t >= last_close + reopen_sec)
             if not (open_long or open_short):
                 prev_bbp = bbp
                 continue
@@ -614,7 +656,7 @@ def _grid_gpu(
 
         prev_bbp = bbp
 
-    final_eq = cash + qty * px[n-1]
+    final_eq = cash + qty * px[n - 1]
     ratio = final_eq / 1000.0  # fixed
     avg_deal = sum_dur / num_deals if num_deals > 0 else 0.0
 
