@@ -151,7 +151,7 @@ def load_binance(symbol, start, end, interval="1m", callback=None):
     # ------------------------------------------------ cache hit?
     if os.path.exists(cache_file):
         try:
-            cached = pd.read_csv(cache_file, parse_dates=["ts"], index_col="ts")
+            cached = pd.read_csv(cache_file, parse_dates=["ts"], index_col="ts")  # Removed engine/dtype/usecols to avoid bug
         except (ValueError, KeyError, pd.errors.EmptyDataError):
             log.warning("Ignoring malformed cache %s", cache_file)
             cached = pd.DataFrame()
