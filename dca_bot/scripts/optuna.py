@@ -310,13 +310,16 @@ def main() -> None:
         # Round to nearest 0.1 (matching search step)
         rounded_spacing = round(avg_spacing / 0.1) * 0.1
         rounded_tp = round(avg_tp / 0.1) * 0.1
+        trail_pcts = [w['best']['params']['trailing_pct'] for w in window_results]
+        avg_trail_pct = np.mean(trail_pcts)
+        rounded_trail_pct = round(avg_trail_pct / 0.1) * 0.1
 
         optimal_params = {
             'spacing_pct': rounded_spacing,
             'tp_pct': rounded_tp,
             'trailing': majority_trailing,
-            'trailing_pct': 0.1,
-            'exit_on_flip': majority_exit,
+            'trailing_pct': rounded_trail_pct,
+            'exit_on_flip': True,
             'bb_tf': closest_bb_tf,
             'supertrend_tf': closest_st_tf,
         }

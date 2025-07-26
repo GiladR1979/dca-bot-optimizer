@@ -1,5 +1,3 @@
-# optuna_search.py (modified with fix)
-
 """
 Full‑engine Optuna optimiser – *study names are per‑symbol*.
 """
@@ -9,7 +7,7 @@ import os
 from typing import Optional, Dict, Tuple
 import math
 from tqdm import tqdm
-import json
+import json  # Added import to fix NameError
 
 import optuna
 import pandas as pd
@@ -17,6 +15,9 @@ import numpy as np
 import cupy as cp
 from optuna.trial import TrialState
 from numba import cuda
+from numba import config
+
+config.CUDA_LOW_OCCUPANCY_WARNINGS = False  # Suppress low occupancy warnings
 
 # ------------------------------------------------------------------ #
 #  duplicate‑trial guard (Optuna 2.x)                                #
@@ -228,8 +229,8 @@ def run_best_study(
             "spacing_pct": spacing_list,
             "tp_pct": tp_list,
             "trailing": [True, False],
-            "trailing_pct": [0.1],
-            "exit_on_flip": [True, False],
+            "trailing_pct": [0.1, 0.2, 0.3, 0.4, 0.5],
+            "exit_on_flip": [True],  # Fixed to True
             "bb_tf": ['3min', '5min', '15min', '30min', '1h', '4h'],
             "supertrend_tf": ['15min', '30min', '1h', '4h', '8h', '1d', '1w'],
         }
@@ -284,7 +285,7 @@ def run_best_study(
                 ])
 
                 outputs_batch = cp.zeros((len(batch), 5))
-                threads = 128
+                threads = 256  # Increased for better occupancy
                 blocks = math.ceil(len(batch) / threads)
                 _grid_gpu[blocks, threads](ts_cp, px_cp, bb_cp, bull_cp, params_cp_batch, outputs_batch)
                 outputs_np_batch = cp.asnumpy(outputs_batch)
@@ -331,8 +332,8 @@ def run_best_study(
                             'spacing_pct': optuna.distributions.FloatDistribution(0.3, 9.0, step=0.1),
                             'tp_pct': optuna.distributions.FloatDistribution(0.5, 5.0, step=0.1),
                             'trailing': optuna.distributions.CategoricalDistribution([False, True]),
-                            'trailing_pct': optuna.distributions.FloatDistribution(0.05, 0.3, step=0.05),
-                            'exit_on_flip': optuna.distributions.CategoricalDistribution([False, True]),
+                            'trailing_pct': optuna.distributions.FloatDistribution(0.1, 0.5, step=0.1),
+                            'exit_on_flip': optuna.distributions.CategoricalDistribution([True]),
                             'bb_tf': optuna.distributions.CategoricalDistribution(
                                 ['3min', '5min', '15min', '30min', '1h', '4h']),
                             'supertrend_tf': optuna.distributions.CategoricalDistribution(
