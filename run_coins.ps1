@@ -28,12 +28,12 @@ $coins = @(
 #  Flags common to every run
 # ------------------------------------------------------------------
 $commonFlags = @(
-    "--interval", "1s"                   #interval for downloading from Binance
+    "--interval", "1m",                   # interval for downloading from Binance
     "--trials",  "1",
     "--jobs",    "8",                     # 0 = run jobs sequentially
     "--storage", "none",                  # In-memory mode
     "--use-gpu",
-    "-v"                                   # verbose logs
+    "-v"                                  # verbose logs
 )
 
 # ------------------------------------------------------------------
@@ -50,12 +50,11 @@ foreach ($c in $coins) {
         $c.Symbol,
         $c.Start,
         $c.End,
-        "--use-sig",  "1",          # ignore indicator
-        "--reopen-sec", "60"        # reopen 60 s after previous exit
-        "--long-only", "1"
-        "--no-flip-exit", "0"
-        "--no-bb-safety",
-        "--supertrend-tf", "30min"
+        "--use-sig",  "1",          # use indicator signals
+        "--reopen-sec", "60",       # reopen 60 s after previous exit
+        "--long-only", "1",         # only long positions
+        "--no-flip-exit", "1",      # no exit on trend flip
+        "--no-bb-safety"           # no BB condition for safety orders
     ) + $commonFlags
 
     & $pythonExe @args
