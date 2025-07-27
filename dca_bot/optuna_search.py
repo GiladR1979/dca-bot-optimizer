@@ -16,7 +16,6 @@ import cupy as cp
 from optuna.trial import TrialState
 from numba import cuda
 from numba import config
-
 config.CUDA_LOW_OCCUPANCY_WARNINGS = False  # Suppress low occupancy warnings
 
 # ------------------------------------------------------------------ #
@@ -24,9 +23,7 @@ config.CUDA_LOW_OCCUPANCY_WARNINGS = False  # Suppress low occupancy warnings
 # ------------------------------------------------------------------ #
 _seen_params: set[tuple] = set()
 
-
-def _param_sig(spacing: float, tp: float, trailing: bool, trail_pct: float, exit_on_flip: bool, bb_tf: str,
-               supertrend_tf: str) -> tuple:
+def _param_sig(spacing: float, tp: float, trailing: bool, trail_pct: float, exit_on_flip: bool, bb_tf: str, supertrend_tf: str) -> tuple:
     """Rounded signature so small FP noise does not count as new."""
     return (
         round(spacing, 3),
@@ -38,32 +35,30 @@ def _param_sig(spacing: float, tp: float, trailing: bool, trail_pct: float, exit
         supertrend_tf,
     )
 
-
 import sqlalchemy
 import sqlalchemy.pool
 
 from .strategies.dca_ts_numba import DCAJITStrategy as DCATrailingStrategy, _bb_percent, _supertrend, _grid_gpu
 from .simulator import calc_metrics
 
-
 # ------------------------------------------------------------------ #
 #  one full back‑test                                                #
 # ------------------------------------------------------------------ #
 
 def _evaluate(
-        df: pd.DataFrame,
-        spacing: float,
-        tp: float,
-        trailing: bool,
-        trail_pct: float,
-        exit_on_flip: bool,
-        bb_tf: str,
-        supertrend_tf: str,
-        *,
-        use_sig: int,
-        reopen_sec: int,
-        long_only: bool = False,
-        use_bb_safety: bool = True,
+    df: pd.DataFrame,
+    spacing: float,
+    tp: float,
+    trailing: bool,
+    trail_pct: float,
+    exit_on_flip: bool,
+    bb_tf: str,
+    supertrend_tf: str,
+    *,
+    use_sig: int,
+    reopen_sec: int,
+    long_only: bool = False,
+    use_bb_safety: bool = True,
 ) -> Dict[str, float]:
     bot = DCATrailingStrategy(
         spacing_pct=spacing,
@@ -85,8 +80,7 @@ def _evaluate(
 #  objective factory                                                 #
 # ------------------------------------------------------------------ #
 
-def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reopen_sec: int, long_only: bool = False,
-                   use_bb_safety: bool = True):
+def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reopen_sec: int, long_only: bool = False, use_bb_safety: bool = True):
     """Return an Optuna objective that optimises a single metric."""
 
     head = (
@@ -114,15 +108,15 @@ def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reop
             raise optuna.TrialPruned()
 
         # ---------- fast head‑run for early pruning --------------------
-        m_head = _evaluate(head, spacing, tp, trailing, trail_pct, exit_on_flip, bb_tf, supertrend_tf, use_sig=use_sig,
-                           reopen_sec=reopen_sec, long_only=long_only, use_bb_safety=use_bb_safety)
-        trial.report(m_head[metric_key], step=0)
+        m_head = _evaluate(head, spacing, tp, trailing, trail_pct, exit_on_flip, bb_tf, supertrend_tf, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, use_bb_safety=use_bb_safety)
+        calmar_head = m_head['annual_pct'] / m_head['max_drawdown_pct'] if m_head['max_drawdown_pct'] > 0 else m_head['annual_pct']
+        trial.report(calmar_head, step=0)
         if trial.should_prune():
             raise optuna.TrialPruned()
 
         # ---------- full back‑test ------------------------------------
-        m_full = _evaluate(df_full, spacing, tp, trailing, trail_pct, exit_on_flip, bb_tf, supertrend_tf,
-                           use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, use_bb_safety=use_bb_safety)
+        m_full = _evaluate(df_full, spacing, tp, trailing, trail_pct, exit_on_flip, bb_tf, supertrend_tf, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, use_bb_safety=use_bb_safety)
+        calmar_full = m_full['annual_pct'] / m_full['max_drawdown_pct'] if m_full['max_drawdown_pct'] > 0 else m_full['annual_pct']
         trial.set_user_attr("metrics", m_full)
         trial.set_user_attr(
             "params",
@@ -136,7 +130,7 @@ def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reop
                 "supertrend_tf": supertrend_tf,
             },
         )
-        return m_full[metric_key]
+        return calmar_full
 
     return _objective
 
@@ -205,19 +199,19 @@ def _new_study(base_name: str, direction: str, storage: Optional[str], symbol: s
 # ------------------------------------------------------------------ #
 
 def run_best_study(
-        df: pd.DataFrame,
-        symbol: str,
-        n_trials: int,
-        n_jobs: int,
-        storage: Optional[str],
-        use_sig: int = 1,
-        reopen_sec: int = 60,
-        long_only: bool = False,
-        exit_on_flip: bool = True,
-        use_bb_safety: bool = True,
-        window_id: str = "",
-        supertrend_tf: str = "30min",
-        use_gpu: bool = False,
+    df: pd.DataFrame,
+    symbol: str,
+    n_trials: int,
+    n_jobs: int,
+    storage: Optional[str],
+    use_sig: int = 1,
+    reopen_sec: int = 60,
+    long_only: bool = False,
+    exit_on_flip: bool = True,
+    use_bb_safety: bool = True,
+    window_id: str = "",
+    supertrend_tf: str = "30min",
+    use_gpu: bool = False,
 ):
     study_best = _new_study("dca_best", "maximize", storage, symbol, window_id)
     if use_gpu:
@@ -231,7 +225,7 @@ def run_best_study(
             "trailing": [True, False],
             "trailing_pct": [0.1, 0.2, 0.3],
             "exit_on_flip": [True],  # Fixed to True
-            "bb_tf": ['3min', '5min', '15min', '30min', '1h'],
+            "bb_tf": ['3min', '5min', '15min', '30min', '1h', '4h'],
             "supertrend_tf": ['15min', '30min', '1h', '4h', '8h', '1d'],
         }
 
@@ -260,7 +254,7 @@ def run_best_study(
         batch_size = 10000  # Adjust based on GPU memory
         num_batches = math.ceil(len(params_list) / batch_size)
 
-        best_apy = -float('inf')
+        best_calmar = -float('inf')
         best_p = None
 
         with tqdm(total=len(params_list), desc=f"Evaluating grid (window {window_id})") as pbar:
@@ -300,11 +294,14 @@ def run_best_study(
                     else:
                         apy = float(np.real((complex(ratio) ** exp - 1))) * 100
 
+                    max_dd = row[1]
+                    calmar = apy / max_dd if max_dd > 0 else apy
+
                     # Update best
-                    if apy > best_apy:
-                        best_apy = apy
+                    if calmar > best_calmar:
+                        best_calmar = calmar
                         best_p = p
-                        tqdm.write(f"Updated best APY: {best_apy:.2f}% with params: {json.dumps(best_p, indent=None)}")
+                        tqdm.write(f"Updated best Calmar: {best_calmar:.2f} with params: {json.dumps(best_p, indent=None)}")
 
                     m = {
                         "deals": row[3],
@@ -316,9 +313,10 @@ def run_best_study(
                         "avg_deal_min": round(row[2], 2),
                         "max_drawdown_pct": round(row[1], 2),
                         "longest_drawdown_min": round(row[4], 2),
+                        "calmar_ratio": round(calmar, 2)  # Add Calmar to metrics
                     }
                     trial = optuna.create_trial(
-                        value=m['annual_pct'],
+                        value= m['calmar_ratio'],  # Use Calmar as objective value
                         params={
                             'spacing_pct': round(p['spacing_pct'], 1),
                             'tp_pct': round(p['tp_pct'], 1),
@@ -334,10 +332,8 @@ def run_best_study(
                             'trailing': optuna.distributions.CategoricalDistribution([False, True]),
                             'trailing_pct': optuna.distributions.FloatDistribution(0.1, 0.5, step=0.1),
                             'exit_on_flip': optuna.distributions.CategoricalDistribution([True]),
-                            'bb_tf': optuna.distributions.CategoricalDistribution(
-                                ['3min', '5min', '15min', '30min', '1h', '4h']),
-                            'supertrend_tf': optuna.distributions.CategoricalDistribution(
-                                ['15min', '30min', '1h', '4h', '8h', '1d', '1w']),
+                            'bb_tf': optuna.distributions.CategoricalDistribution(['3min', '5min', '15min', '30min', '1h', '4h']),
+                            'supertrend_tf': optuna.distributions.CategoricalDistribution(['15min', '30min', '1h', '4h', '8h', '1d', '1w']),
                         },
                         state=TrialState.COMPLETE,
                         user_attrs={'params': p, 'metrics': m}
@@ -346,9 +342,9 @@ def run_best_study(
 
                 pbar.update(len(batch))
 
+
     study_best.optimize(
-        make_objective(df, "annual_pct", use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only,
-                       use_bb_safety=use_bb_safety),
+        make_objective(df, "annual_pct", use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, use_bb_safety=use_bb_safety),
         n_trials=n_trials,
         n_jobs=n_jobs,
         show_progress_bar=True,

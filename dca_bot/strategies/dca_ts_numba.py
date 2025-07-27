@@ -1,3 +1,5 @@
+# dca_ts_numba.py (fixed)
+
 """
 Numba‑accelerated dual‑side DCA strategy (spot) with GPU Monte Carlo support.
 """

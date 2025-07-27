@@ -102,6 +102,8 @@ def monte_carlo_backtest(
     days_span = max((df.index[-1] - df.index[0]).total_seconds() / 86400, 1)
     apys = (ratios ** (365 / days_span) - 1) * 100
 
+    calmar_ratios = [apy / max_dd if max_dd > 0 else apy for apy, max_dd in zip(apys, max_dds)]
+
     agg = {
         'avg_apy_pct': float(np.mean(apys)),
         'std_apy_pct': float(np.std(apys)),
@@ -109,6 +111,7 @@ def monte_carlo_backtest(
         'worst_drawdown_pct': float(np.max(max_dds)),
         'avg_deals': float(np.mean(num_dealss)),
         'avg_deal_min': float(np.mean(avg_deal_mins)),
+        'avg_calmar_ratio': float(np.mean(calmar_ratios)),
     }
     cp.get_default_memory_pool().free_all_blocks()
 
@@ -209,7 +212,7 @@ def main() -> None:
             'window_end': str(df.index.max()),
             'best': {'params': best_p, 'mc_metrics': best_mc},
         }]
-        overall_summary = {'best': [best_mc['avg_apy_pct']]}
+        overall_summary = {'best': [best_mc['avg_calmar_ratio']]}
     else:
         # ------------------------------------------------ Walk-Forward Optimization
         window_results = []
@@ -262,13 +265,13 @@ def main() -> None:
             window_results.append(window_summary)
 
             # Aggregate for overall
-            overall_summary['best'].append(best_mc['avg_apy_pct'])
+            overall_summary['best'].append(best_mc['avg_calmar_ratio'])
 
             current_start += relativedelta(months=slide_months)
 
     # ------------------------------------------------ Overall aggregates
     overall = {
-        'avg_best_apy': float(np.mean(overall_summary['best'])),
+        'avg_best_calmar': float(np.mean(overall_summary['best'])),
         'windows': window_results,
     }
 
