@@ -229,10 +229,10 @@ def run_best_study(
             "spacing_pct": spacing_list,
             "tp_pct": tp_list,
             "trailing": [True, False],
-            "trailing_pct": [0.1, 0.2, 0.3, 0.4, 0.5],
+            "trailing_pct": [0.1, 0.2, 0.3],
             "exit_on_flip": [True],  # Fixed to True
-            "bb_tf": ['3min', '5min', '15min', '30min', '1h', '4h'],
-            "supertrend_tf": ['15min', '30min', '1h', '4h', '8h', '1d', '1w'],
+            "bb_tf": ['3min', '5min', '15min', '30min', '1h'],
+            "supertrend_tf": ['15min', '30min', '1h', '4h', '8h', '1d'],
         }
 
         params_list = []

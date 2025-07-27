@@ -1,5 +1,3 @@
-# optuna.py (modified)
-
 import argparse
 import json
 import logging
@@ -21,7 +19,6 @@ from ..plotting import equity_curve
 RES = os.path.join(os.path.dirname(__file__), "..", "..", "results")
 os.makedirs(RES, exist_ok=True)
 
-
 # -------------------------------------------------------------------- helpers
 def parse_tf_to_min(tf: str) -> int:
     if tf.endswith('min'):
@@ -34,22 +31,19 @@ def parse_tf_to_min(tf: str) -> int:
         return int(tf[:-1]) * 1440 * 7
     raise ValueError(f"Unknown timeframe: {tf}")
 
-
 def run_set(
-        params: Dict,
-        df,
-        label: str,
-        base: str,
-        use_sig: int,
-        reopen_sec: int,
-        long_only: bool = False,
-        exit_on_flip: bool = True,
-        use_bb_safety: bool = True,
-        supertrend_tf: str = "30min",
+    params: Dict,
+    df,
+    label: str,
+    base: str,
+    use_sig: int,
+    reopen_sec: int,
+    long_only: bool = False,
+    exit_on_flip: bool = True,
+    use_bb_safety: bool = True,
 ) -> Tuple[Dict, str, Tuple]:
     """Back-test one parameter set and return (metrics, PNG path, panel item)."""
-    bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only,
-                              use_bb_safety=use_bb_safety, supertrend_tf=supertrend_tf)
+    bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, use_bb_safety=use_bb_safety)
     deals, eq = bot.backtest(df)
     met = calc_metrics(deals, eq)
 
@@ -58,22 +52,19 @@ def run_set(
 
     return met, png, (eq, deals, label)
 
-
 def monte_carlo_backtest(
-        df: pd.DataFrame,
-        params: Dict,
-        use_sig: int,
-        reopen_sec: int,
-        long_only: bool = False,
-        exit_on_flip: bool = True,
-        use_bb_safety: bool = True,
-        supertrend_tf: str = "30min",
-        num_sims: int = 50,  # Reduced from 100
-        noise_std: float = 0.001,  # 0.1% std dev noise
+    df: pd.DataFrame,
+    params: Dict,
+    use_sig: int,
+    reopen_sec: int,
+    long_only: bool = False,
+    exit_on_flip: bool = True,
+    use_bb_safety: bool = True,
+    num_sims: int = 50,  # Reduced from 100
+    noise_std: float = 0.001,  # 0.1% std dev noise
 ) -> Dict:
     """Run Monte Carlo simulations with price perturbations on GPU, in batches to avoid OOM."""
-    bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only,
-                              use_bb_safety=use_bb_safety, supertrend_tf=supertrend_tf)
+    bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, use_bb_safety=use_bb_safety)
     batch_size = 20  # Process 20 sims per batch to reduce memory usage
     all_results = []
 
@@ -122,7 +113,6 @@ def monte_carlo_backtest(
     cp.get_default_memory_pool().free_all_blocks()
 
     return agg
-
 
 # -------------------------------------------------------------------- main CLI
 def main() -> None:
@@ -212,8 +202,7 @@ def main() -> None:
         best_p, _ = _pick(best_st)
 
         # MC on full (no split)
-        best_mc = monte_carlo_backtest(df, best_p, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip,
-                                       use_bb_safety=use_bb_safety, supertrend_tf=supertrend_tf)
+        best_mc = monte_carlo_backtest(df, best_p, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip, use_bb_safety=use_bb_safety)
 
         window_results = [{
             'window_start': str(df.index.min()),
@@ -237,8 +226,7 @@ def main() -> None:
             test_df = df.loc[train_end + pd.Timedelta(seconds=1):end_win]  # Out-of-sample
 
             window_id = current_start.strftime('%Y-%m-%d')
-            logging.info(
-                f"Processing window: {current_start} to {end_win} (train: {current_start} to {train_end}, test: {train_end} to {end_win})")
+            logging.info(f"Processing window: {current_start} to {end_win} (train: {current_start} to {train_end}, test: {train_end} to {end_win})")
 
             # Run optimization on train
             best_st = run_best_study(
@@ -264,8 +252,7 @@ def main() -> None:
             best_p, _ = _pick(best_st)
 
             # Validate with Monte Carlo on test
-            best_mc = monte_carlo_backtest(test_df, best_p, args.use_sig, args.reopen_sec, bool(args.long_only),
-                                           exit_on_flip, use_bb_safety=use_bb_safety, supertrend_tf=supertrend_tf)
+            best_mc = monte_carlo_backtest(test_df, best_p, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip, use_bb_safety=use_bb_safety)
 
             window_summary = {
                 'window_start': str(current_start),
@@ -290,29 +277,27 @@ def main() -> None:
         spacings = [w['best']['params']['spacing_pct'] for w in window_results]
         tps = [w['best']['params']['tp_pct'] for w in window_results]
         trailings = [w['best']['params']['trailing'] for w in window_results]
+        trail_pcts = [w['best']['params']['trailing_pct'] for w in window_results]
         bb_mins_list = [parse_tf_to_min(w['best']['params']['bb_tf']) for w in window_results]
         st_mins_list = [parse_tf_to_min(w['best']['params']['supertrend_tf']) for w in window_results]
-        exit_flips = [w['best']['params']['exit_on_flip'] for w in window_results]
 
         avg_spacing = np.mean(spacings)
         avg_tp = np.mean(tps)
         majority_trailing = bool(np.sum(trailings) > len(trailings) / 2)  # Explicitly cast to Python bool
+        avg_trail_pct = np.mean(trail_pcts)
         avg_bb_min = np.mean(bb_mins_list)
         avg_st_min = np.mean(st_mins_list)
-        majority_exit = bool(np.sum(exit_flips) > len(exit_flips) / 2)
+
+        # Round to nearest 0.1 (matching search step)
+        rounded_spacing = round(avg_spacing / 0.1) * 0.1
+        rounded_tp = round(avg_tp / 0.1) * 0.1
+        rounded_trail_pct = round(avg_trail_pct / 0.1) * 0.1
 
         possible_bb = ['3min', '5min', '15min', '30min', '1h', '4h']
         possible_st = ['15min', '30min', '1h', '4h', '8h', '1d', '1w']
 
         closest_bb_tf = min(possible_bb, key=lambda tf: abs(parse_tf_to_min(tf) - avg_bb_min))
         closest_st_tf = min(possible_st, key=lambda tf: abs(parse_tf_to_min(tf) - avg_st_min))
-
-        # Round to nearest 0.1 (matching search step)
-        rounded_spacing = round(avg_spacing / 0.1) * 0.1
-        rounded_tp = round(avg_tp / 0.1) * 0.1
-        trail_pcts = [w['best']['params']['trailing_pct'] for w in window_results]
-        avg_trail_pct = np.mean(trail_pcts)
-        rounded_trail_pct = round(avg_trail_pct / 0.1) * 0.1
 
         optimal_params = {
             'spacing_pct': rounded_spacing,
@@ -328,22 +313,17 @@ def main() -> None:
         # Generate and save "best" graph with optimal params on full data (if not skipped)
         if not args.no_graph:
             optimal_met, optimal_png, _ = run_set(
-                optimal_params, df, "optimal", args.symbol, args.use_sig, args.reopen_sec, bool(args.long_only),
-                exit_on_flip, use_bb_safety=use_bb_safety, supertrend_tf=supertrend_tf
+                optimal_params, df, "optimal", args.symbol, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip, use_bb_safety=use_bb_safety
             )
         else:
-            bot = DCATrailingStrategy(**optimal_params, use_sig=args.use_sig, reopen_sec=args.reopen_sec,
-                                      long_only=bool(args.long_only), use_bb_safety=use_bb_safety,
-                                      supertrend_tf=supertrend_tf)
+            bot = DCATrailingStrategy(**optimal_params, use_sig=args.use_sig, reopen_sec=args.reopen_sec, long_only=bool(args.long_only), use_bb_safety=use_bb_safety)
             deals, eq = bot.backtest(df)
             optimal_met = calc_metrics(deals, eq)
             optimal_png = None
 
         overall['optimal_params'] = optimal_params
         overall['optimal_png'] = optimal_png
-        overall['optimal_mc_metrics'] = monte_carlo_backtest(df, optimal_params, args.use_sig, args.reopen_sec,
-                                                             bool(args.long_only), exit_on_flip,
-                                                             use_bb_safety=use_bb_safety, supertrend_tf=supertrend_tf)
+        overall['optimal_mc_metrics'] = monte_carlo_backtest(df, optimal_params, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip, use_bb_safety=use_bb_safety)
     else:
         print("No windows processed – cannot compute optimal parameters.")
 
@@ -358,9 +338,10 @@ def main() -> None:
         tp_pct=0.6,
         trailing=True,
         trailing_pct=0.1,
+        bb_tf='3min',
+        supertrend_tf=args.supertrend_tf,
     )
-    default_mc = monte_carlo_backtest(df, default_p, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip,
-                                      use_bb_safety=use_bb_safety, supertrend_tf=supertrend_tf)
+    default_mc = monte_carlo_backtest(df, default_p, args.use_sig, args.reopen_sec, bool(args.long_only), exit_on_flip, use_bb_safety=use_bb_safety)
     print(f"Default MC on full data: {json.dumps(default_mc, indent=2)}")
 
 
