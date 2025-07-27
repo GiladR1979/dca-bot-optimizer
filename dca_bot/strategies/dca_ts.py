@@ -17,8 +17,7 @@ def _atr(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 10) ->
     atr = tr.rolling(window=window).mean()
     return atr
 
-def _supertrend_signal(df: pd.DataFrame) -> pd.Series:
-    tf = "30min"
+def _supertrend_signal(df: pd.DataFrame, tf: str = "30min") -> pd.Series:
     hlc = df.resample(tf).agg(
         high=("high", "max"),
         low=("low", "min"),
@@ -42,8 +41,8 @@ def _supertrend_signal(df: pd.DataFrame) -> pd.Series:
 
     return bull.reindex(df.index, method="ffill").fillna(False)
 
-def _bb_percent(df: pd.DataFrame) -> pd.Series:
-    ohlc_3m = df.resample("3min").agg(
+def _bb_percent(df: pd.DataFrame, tf: str = "3min") -> pd.Series:
+    ohlc_3m = df.resample(tf).agg(
         high=("high", "max"),
         low=("low", "min"),
         close=("close", "last"),
@@ -73,6 +72,10 @@ class DCATrailingStrategy:
         reopen_sec: Optional[int] = None,
         use_sig: bool = True,
         long_only: bool = False,
+        exit_on_flip: bool = True,
+        use_bb_safety: bool = True,
+        bb_tf: str = "3min",
+        supertrend_tf: str = "30min",
         **_ignored,
     ):
         self.base_order = base_order
@@ -87,12 +90,17 @@ class DCATrailingStrategy:
         self.fee_rate = fee_rate
         self.initial_balance = initial_balance
         self.reopen_sec = reopen_sec
+        self.use_sig = use_sig
         self.long_only = long_only
+        self.exit_on_flip = exit_on_flip
+        self.use_bb_safety = use_bb_safety
+        self.bb_tf = bb_tf
+        self.supertrend_tf = supertrend_tf
 
     def backtest(self, df: pd.DataFrame, cooldown_sec: int = 60) -> Tuple[List[Tuple], List[Tuple]]:
         df = df.copy()
-        df["bull"] = _supertrend_signal(df)
-        df["bbp"] = _bb_percent(df)
+        df["bull"] = _supertrend_signal(df, self.supertrend_tf)
+        df["bbp"] = _bb_percent(df, self.bb_tf)
 
         cash = self.initial_balance
         qty = 0.0
@@ -121,12 +129,23 @@ class DCATrailingStrategy:
             bbp = row.bbp
 
             if state == "idle":
-                if self.long_only:
-                    open_long = bull and (prev_bbp <= 0 < bbp) and self._can_reopen(epoch, last_close_ts)
-                    open_short = False
+                # Check if we should open a position
+                if self.use_sig:
+                    if self.long_only:
+                        open_long = bull and (prev_bbp <= 0 < bbp) and self._can_reopen(epoch, last_close_ts)
+                        open_short = False
+                    else:
+                        open_long = bull and (prev_bbp <= 0 < bbp) and self._can_reopen(epoch, last_close_ts)
+                        open_short = (not bull) and (prev_bbp >= 1 > bbp) and self._can_reopen(epoch, last_close_ts)
                 else:
-                    open_long = bull and (prev_bbp <= 0 < bbp) and self._can_reopen(epoch, last_close_ts)
-                    open_short = (not bull) and (prev_bbp >= 1 > bbp) and self._can_reopen(epoch, last_close_ts)
+                    # If use_sig is False, open immediately after reopen_sec
+                    if self.long_only:
+                        open_long = bull and self._can_reopen(epoch, last_close_ts)
+                        open_short = False
+                    else:
+                        open_long = bull and self._can_reopen(epoch, last_close_ts)
+                        open_short = (not bull) and self._can_reopen(epoch, last_close_ts)
+
                 if not (open_long or open_short):
                     prev_bbp = bbp
                     continue
@@ -156,7 +175,13 @@ class DCATrailingStrategy:
 
             # ---------- safety orders ----------
             need_safety = (side == 1 and price <= next_order) or (side == -1 and price >= next_order)
-            bb_condition = (side == 1 and bbp < 0.1) or (side == -1 and bbp > 0.9)
+
+            # Apply BB condition only if use_bb_safety is True
+            if self.use_bb_safety:
+                bb_condition = (side == 1 and bbp < 0.1) or (side == -1 and bbp > 0.9)
+            else:
+                bb_condition = True
+
             if state == "active" and need_safety and bb_condition and dca_count < self.max_safety and epoch - deal_entry_ts >= cooldown_sec:
                 dca_count += 1
                 usd = ladder0 * (self.mult ** dca_count)
@@ -195,9 +220,11 @@ class DCATrailingStrategy:
                 else:
                     exit_now = True
 
-            trend_flip = (side == 1 and not bull) or (side == -1 and bull)
-            if trend_flip:
-                exit_now = True
+            # Check for trend flip exit only if exit_on_flip is True
+            if self.exit_on_flip:
+                trend_flip = (side == 1 and not bull) or (side == -1 and bull)
+                if trend_flip:
+                    exit_now = True
 
             # ---------- close ----------
             if state == "active" and exit_now:

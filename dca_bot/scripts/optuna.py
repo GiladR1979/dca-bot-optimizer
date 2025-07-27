@@ -43,7 +43,15 @@ def run_set(
     use_bb_safety: bool = True,
 ) -> Tuple[Dict, str, Tuple]:
     """Back-test one parameter set and return (metrics, PNG path, panel item)."""
-    bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, use_bb_safety=use_bb_safety)
+    # Ensure all CLI parameters are properly passed to the strategy
+    bot = DCATrailingStrategy(
+        **params,  # Unpack the optimization parameters
+        use_sig=use_sig,
+        reopen_sec=reopen_sec,
+        long_only=long_only,
+        exit_on_flip=exit_on_flip,  # Make sure this isn't overridden by params
+        use_bb_safety=use_bb_safety
+    )
     deals, eq = bot.backtest(df)
     met = calc_metrics(deals, eq)
 
@@ -60,11 +68,19 @@ def monte_carlo_backtest(
     long_only: bool = False,
     exit_on_flip: bool = True,
     use_bb_safety: bool = True,
-    num_sims: int = 50,  # Reduced from 100
-    noise_std: float = 0.001,  # 0.1% std dev noise
+    num_sims: int = 50,
+    noise_std: float = 0.001,
 ) -> Dict:
     """Run Monte Carlo simulations with price perturbations on GPU, in batches to avoid OOM."""
-    bot = DCATrailingStrategy(**params, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, use_bb_safety=use_bb_safety)
+    # Create bot with all parameters including CLI ones
+    bot = DCATrailingStrategy(
+        **params,
+        use_sig=use_sig,
+        reopen_sec=reopen_sec,
+        long_only=long_only,
+        exit_on_flip=exit_on_flip,  # Ensure this uses CLI value
+        use_bb_safety=use_bb_safety
+    )
     batch_size = 20  # Process 20 sims per batch to reduce memory usage
     all_results = []
 
@@ -315,10 +331,16 @@ def main() -> None:
             'tp_pct': rounded_tp,
             'trailing': majority_trailing,
             'trailing_pct': rounded_trail_pct,
-            'exit_on_flip': True,
+            'exit_on_flip': exit_on_flip,  # Use CLI value, not hardcoded True
             'bb_tf': closest_bb_tf,
             'supertrend_tf': closest_st_tf,
+            # These will be added by run_set, but let's be explicit:
+            'use_sig': args.use_sig,
+            'reopen_sec': args.reopen_sec,
+            'long_only': bool(args.long_only),
+            'use_bb_safety': use_bb_safety,
         }
+
         print(f"Optimal overall parameters: {json.dumps(optimal_params, indent=2)}")
 
         # Generate and save "best" graph with optimal params on full data (if not skipped)

@@ -450,11 +450,15 @@ def _loop_gpu(
     results[sim_idx, 4] = max_len
 
 
-# ------------------ GPU Grid kernel ------------------
+# ------------------ GPU Grid kernel (FIXED) ------------------
 @cuda.jit
 def _grid_gpu(
     ts, px, bb_arrays, bull_arrays,
-    params, results
+    params, results,
+    # Add CLI parameters
+    max_safety, base_order, mult, fee_rate, initial_balance,
+    reopen_sec, compound_int, risk_pct, long_only_int,
+    use_bb_safety_int, cooldown_sec
 ):
     param_idx = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
     if param_idx >= params.shape[0]:
@@ -469,12 +473,12 @@ def _grid_gpu(
     st_idx = int(params[param_idx, 6])
 
     n = len(ts)
-    cash = 1000.0  # fixed initial_balance
+    cash = initial_balance  # Use CLI value
     qty = 0.0
     avg = 0.0
     side = 0
     in_trade = False
-    ladder0 = 16.6078  # fixed base_order
+    ladder0 = base_order  # Use CLI value
     safety_cnt = 0
     next_order = 0.0
     trail_ext = 0.0
@@ -489,17 +493,6 @@ def _grid_gpu(
     max_len = 0
     sum_dur = 0.0
     num_deals = 0
-
-    # fixed other params for grid
-    max_safety = 8
-    mult = 1.5
-    fee_rate = 0.001
-    reopen_sec = -1
-    compound_int = 1
-    risk_pct = 0.013085
-    long_only_int = 0
-    cooldown_sec = 60
-    use_bb_safety_int = 1
 
     bb_percent = bb_arrays[bb_idx]
     bull = bull_arrays[st_idx]
@@ -622,7 +615,7 @@ def _grid_gpu(
         prev_bbp = bbp
 
     final_eq = cash + qty * px[n-1]
-    ratio = final_eq / 1000.0  # fixed
+    ratio = final_eq / initial_balance  # Use CLI value
     avg_deal = sum_dur / num_deals if num_deals > 0 else 0.0
 
     results[param_idx, 0] = ratio
