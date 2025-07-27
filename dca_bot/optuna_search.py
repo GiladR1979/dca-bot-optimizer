@@ -8,6 +8,7 @@ from typing import Optional, Dict, Tuple
 import math
 from tqdm import tqdm
 import json  # Added import to fix NameError
+from collections import defaultdict
 
 import optuna
 import pandas as pd
@@ -17,6 +18,16 @@ from optuna.trial import TrialState
 from numba import cuda
 from numba import config
 config.CUDA_LOW_OCCUPANCY_WARNINGS = False  # Suppress low occupancy warnings
+
+PARAM_RANGES = {
+    "spacing_pct": {"low": 0.3, "high": 9.0, "step": 0.1},
+    "tp_pct": {"low": 0.5, "high": 5.0, "step": 0.1},
+    "trailing": [False, True],
+    "trailing_pct": {"low": 0.1, "high": 0.5, "step": 0.1},
+    "exit_on_flip": [True],
+    "bb_tf": ['3min', '5min', '15min', '30min', '1h', '4h', '8h'],
+    "supertrend_tf": ['5min', '15min', '30min', '1h', '4h', '8h', '1d', 'W'],
+}
 
 # ------------------------------------------------------------------ #
 #  duplicate‑trial guard (Optuna 2.x)                                #
@@ -75,13 +86,12 @@ def _evaluate(
     deals, eq = bot.backtest(df)
     return calc_metrics(deals, eq)
 
-
 # ------------------------------------------------------------------ #
 #  objective factory                                                 #
 # ------------------------------------------------------------------ #
 
-def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reopen_sec: int, long_only: bool = False, use_bb_safety: bool = True):
-    """Return an Optuna objective that optimises a single metric."""
+def make_objective(df_full: pd.DataFrame, *, use_sig: int, reopen_sec: int, long_only: bool = False, use_bb_safety: bool = True):
+    """Return an Optuna objective that optimizes multiple metrics."""
 
     head = (
         df_full.resample("30min").first().iloc[: max(300, len(df_full) // 10)]
@@ -89,13 +99,13 @@ def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reop
 
     # ------------------------------------------------------------------ #
     def _objective(trial: optuna.Trial):
-        spacing = trial.suggest_float("spacing_pct", 0.3, 9.0, step=0.1)
-        tp = trial.suggest_float("tp_pct", 0.5, 5.0, step=0.1)
-        trailing = trial.suggest_categorical("trailing", [False, True])
-        trail_pct = 0.1
-        exit_on_flip = trial.suggest_categorical("exit_on_flip", [False, True])
-        bb_tf = trial.suggest_categorical("bb_tf", ['3min', '5min', '15min', '30min', '1h', '4h'])
-        supertrend_tf = trial.suggest_categorical("supertrend_tf", ['15min', '30min', '1h', '4h', '8h', '1d', '1w'])
+        spacing = trial.suggest_float("spacing_pct", **PARAM_RANGES["spacing_pct"])
+        tp = trial.suggest_float("tp_pct", **PARAM_RANGES["tp_pct"])
+        trailing = trial.suggest_categorical("trailing", PARAM_RANGES["trailing"])
+        trail_pct = trial.suggest_float("trailing_pct", **PARAM_RANGES["trailing_pct"])
+        exit_on_flip = trial.suggest_categorical("exit_on_flip", PARAM_RANGES["exit_on_flip"])
+        bb_tf = trial.suggest_categorical("bb_tf", PARAM_RANGES["bb_tf"])
+        supertrend_tf = trial.suggest_categorical("supertrend_tf", PARAM_RANGES["supertrend_tf"])
 
         # ---- skip exact‑duplicate parameter sets --------------------
         sig = _param_sig(spacing, tp, trailing, trail_pct, exit_on_flip, bb_tf, supertrend_tf)
@@ -107,16 +117,12 @@ def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reop
         if trailing and tp - trail_pct < 0.5 - 1e-9:
             raise optuna.TrialPruned()
 
-        # ---------- fast head‑run for early pruning --------------------
-        m_head = _evaluate(head, spacing, tp, trailing, trail_pct, exit_on_flip, bb_tf, supertrend_tf, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, use_bb_safety=use_bb_safety)
-        calmar_head = m_head['annual_pct'] / m_head['max_drawdown_pct'] if m_head['max_drawdown_pct'] > 0 else m_head['annual_pct']
-        trial.report(calmar_head, step=0)
-        if trial.should_prune():
-            raise optuna.TrialPruned()
-
         # ---------- full back‑test ------------------------------------
+        # (Removed head-run pruning as Trial.report is not supported in MOO)
         m_full = _evaluate(df_full, spacing, tp, trailing, trail_pct, exit_on_flip, bb_tf, supertrend_tf, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, use_bb_safety=use_bb_safety)
-        calmar_full = m_full['annual_pct'] / m_full['max_drawdown_pct'] if m_full['max_drawdown_pct'] > 0 else m_full['annual_pct']
+        full_apy = m_full['annual_pct']
+        full_dd = m_full['max_drawdown_pct']
+
         trial.set_user_attr("metrics", m_full)
         trial.set_user_attr(
             "params",
@@ -130,10 +136,9 @@ def make_objective(df_full: pd.DataFrame, metric_key: str, *, use_sig: int, reop
                 "supertrend_tf": supertrend_tf,
             },
         )
-        return calmar_full
+        return full_apy, full_dd  # Multi-objective: max APY, min DD
 
     return _objective
-
 
 # ------------------------------------------------------------------ #
 #  register existing trials in the duplicate cache                   #
@@ -157,18 +162,17 @@ def _register_trials(study: optuna.study.Study):
         )
         _seen_params.add(sig)
 
-
 # ------------------------------------------------------------------ #
 #  create / run a study                                              #
 # ------------------------------------------------------------------ #
 
-def _new_study(base_name: str, direction: str, storage: Optional[str], symbol: str, window_id: str = ""):
+def _new_study(base_name: str, directions: list, storage: Optional[str], symbol: str, window_id: str = ""):
     """Create (or reopen) an Optuna study whose name is unique per symbol and window."""
 
     full_name = f"{base_name}_{symbol}"
     if window_id:
         full_name += f"_{window_id}"
-    sampler = optuna.samplers.TPESampler(seed=42)  # no duplicates
+    sampler = optuna.samplers.NSGAIISampler(seed=42)  # Multi-objective sampler
     pruner = optuna.pruners.NopPruner()
 
     if storage:
@@ -182,7 +186,7 @@ def _new_study(base_name: str, direction: str, storage: Optional[str], symbol: s
 
     study = optuna.create_study(
         study_name=full_name,
-        direction=direction,
+        directions=directions,  # ['maximize', 'minimize']
         sampler=sampler,
         pruner=pruner,
         storage=storage_obj,
@@ -193,7 +197,6 @@ def _new_study(base_name: str, direction: str, storage: Optional[str], symbol: s
 
     return study
 
-
 # ------------------------------------------------------------------ #
 #  high‑level helper                                                 #
 # ------------------------------------------------------------------ #
@@ -201,9 +204,9 @@ def _new_study(base_name: str, direction: str, storage: Optional[str], symbol: s
 def run_best_study(
     df: pd.DataFrame,
     symbol: str,
-    n_trials: int,
-    n_jobs: int,
-    storage: Optional[str],
+    n_trials: int = 100,
+    n_jobs: int = 1,
+    storage: Optional[str] = None,
     use_sig: int = 1,
     reopen_sec: int = 60,
     long_only: bool = False,
@@ -212,21 +215,23 @@ def run_best_study(
     window_id: str = "",
     supertrend_tf: str = "30min",
     use_gpu: bool = False,
+    max_dd_threshold: float = 20.0,
 ):
-    study_best = _new_study("dca_best", "maximize", storage, symbol, window_id)
+    study_best = _new_study("dca_best", ["maximize", "minimize"], storage, symbol, window_id)
     if use_gpu:
         import itertools
         # Generate grids with exact rounding to avoid FP precision issues
-        spacing_list = [round(0.3 + 0.1 * i, 1) for i in range(int((9.0 - 0.3) / 0.1) + 1)]
-        tp_list = [round(0.5 + 0.1 * i, 1) for i in range(int((5.0 - 0.5) / 0.1) + 1)]
+        spacing_list = [round(PARAM_RANGES["spacing_pct"]["low"] + PARAM_RANGES["spacing_pct"]["step"] * i, 1) for i in range(int((PARAM_RANGES["spacing_pct"]["high"] - PARAM_RANGES["spacing_pct"]["low"]) / PARAM_RANGES["spacing_pct"]["step"]) + 1)]
+        tp_list = [round(PARAM_RANGES["tp_pct"]["low"] + PARAM_RANGES["tp_pct"]["step"] * i, 1) for i in range(int((PARAM_RANGES["tp_pct"]["high"] - PARAM_RANGES["tp_pct"]["low"]) / PARAM_RANGES["tp_pct"]["step"]) + 1)]
+        trail_pct_list = [round(PARAM_RANGES["trailing_pct"]["low"] + PARAM_RANGES["trailing_pct"]["step"] * i, 1) for i in range(int((PARAM_RANGES["trailing_pct"]["high"] - PARAM_RANGES["trailing_pct"]["low"]) / PARAM_RANGES["trailing_pct"]["step"]) + 1)]
         grid = {
             "spacing_pct": spacing_list,
             "tp_pct": tp_list,
-            "trailing": [True, False],
-            "trailing_pct": [0.1, 0.2, 0.3],
-            "exit_on_flip": [True],  # Fixed to True
-            "bb_tf": ['3min', '5min', '15min', '30min', '1h', '4h'],
-            "supertrend_tf": ['15min', '30min', '1h', '4h', '8h', '1d'],
+            "trailing": PARAM_RANGES["trailing"],
+            "trailing_pct": trail_pct_list,
+            "exit_on_flip": PARAM_RANGES["exit_on_flip"],
+            "bb_tf": PARAM_RANGES["bb_tf"],
+            "supertrend_tf": PARAM_RANGES["supertrend_tf"],
         }
 
         params_list = []
@@ -250,21 +255,31 @@ def run_best_study(
         px_cp = cp.asarray(px)
         ts_cp = cp.asarray(ts)
 
-        # Batch processing
+        # Batch processing with pruning
         batch_size = 10000  # Adjust based on GPU memory
-        num_batches = math.ceil(len(params_list) / batch_size)
-
-        best_calmar = -float('inf')
-        best_p = None
-
+        index = 0
+        b = 0  # Batch counter
+        eval_list = []  # List to store (param, apy, dd) for all evaluated
+        spacing_apys = defaultdict(list)
+        spacing_dds = defaultdict(list)
+        tp_apys = defaultdict(list)
+        tp_dds = defaultdict(list)
+        trailing_apys = defaultdict(list)
+        trailing_dds = defaultdict(list)
+        trailing_pct_apys = defaultdict(list)
+        trailing_pct_dds = defaultdict(list)
+        bb_tf_apys = defaultdict(list)
+        bb_tf_dds = defaultdict(list)
+        supertrend_tf_apys = defaultdict(list)
+        supertrend_tf_dds = defaultdict(list)
+        pareto_candidates = []
         with tqdm(total=len(params_list), desc=f"Evaluating grid (window {window_id})") as pbar:
-            for b in range(num_batches):
-                start = b * batch_size
-                end = min(start + batch_size, len(params_list))
-                batch = params_list[start:end]
+            while index < len(params_list):
+                end = min(index + batch_size, len(params_list))
+                batch = params_list[index:end]
 
                 if not batch:
-                    continue
+                    break
 
                 params_cp_batch = cp.array([
                     [
@@ -295,13 +310,34 @@ def run_best_study(
                         apy = float(np.real((complex(ratio) ** exp - 1))) * 100
 
                     max_dd = row[1]
-                    calmar = apy / max_dd if max_dd > 0 else apy
 
-                    # Update best
-                    if calmar > best_calmar:
-                        best_calmar = calmar
-                        best_p = p
-                        tqdm.write(f"Updated best Calmar: {best_calmar:.2f} with params: {json.dumps(best_p, indent=None)}")
+                    eval_list.append((p, apy, max_dd))
+
+                    # Append to groups
+                    spacing_apys[p['spacing_pct']].append(apy)
+                    spacing_dds[p['spacing_pct']].append(max_dd)
+                    tp_apys[p['tp_pct']].append(apy)
+                    tp_dds[p['tp_pct']].append(max_dd)
+                    trailing_apys[p['trailing']].append(apy)
+                    trailing_dds[p['trailing']].append(max_dd)
+                    trailing_pct_apys[p['trailing_pct']].append(apy)
+                    trailing_pct_dds[p['trailing_pct']].append(max_dd)
+                    bb_tf_apys[p['bb_tf']].append(apy)
+                    bb_tf_dds[p['bb_tf']].append(max_dd)
+                    supertrend_tf_apys[p['supertrend_tf']].append(apy)
+                    supertrend_tf_dds[p['supertrend_tf']].append(max_dd)
+
+                    # Update Pareto candidates
+                    is_dominated = False
+                    new_pareto = []
+                    for cand in pareto_candidates:
+                        if (cand['apy'] >= apy and cand['dd'] <= max_dd) and (cand['apy'] > apy or cand['dd'] < max_dd):
+                            is_dominated = True
+                        if not (apy >= cand['apy'] and max_dd <= cand['dd']) or not (apy > cand['apy'] or max_dd < cand['dd']):
+                            new_pareto.append(cand)
+                    if not is_dominated:
+                        new_pareto.append({'params': p, 'apy': apy, 'dd': max_dd})
+                    pareto_candidates = new_pareto
 
                     m = {
                         "deals": row[3],
@@ -311,12 +347,11 @@ def run_best_study(
                         "apy_pct": round(apy, 2),
                         "annual_usd": round(1000 * apy / 100, 2),
                         "avg_deal_min": round(row[2], 2),
-                        "max_drawdown_pct": round(row[1], 2),
+                        "max_drawdown_pct": round(max_dd, 2),
                         "longest_drawdown_min": round(row[4], 2),
-                        "calmar_ratio": round(calmar, 2)  # Add Calmar to metrics
                     }
                     trial = optuna.create_trial(
-                        value= m['calmar_ratio'],  # Use Calmar as objective value
+                        values=[apy, max_dd],  # List for multi-objective
                         params={
                             'spacing_pct': round(p['spacing_pct'], 1),
                             'tp_pct': round(p['tp_pct'], 1),
@@ -327,13 +362,13 @@ def run_best_study(
                             'supertrend_tf': p['supertrend_tf'],
                         },
                         distributions={
-                            'spacing_pct': optuna.distributions.FloatDistribution(0.3, 9.0, step=0.1),
-                            'tp_pct': optuna.distributions.FloatDistribution(0.5, 5.0, step=0.1),
-                            'trailing': optuna.distributions.CategoricalDistribution([False, True]),
-                            'trailing_pct': optuna.distributions.FloatDistribution(0.1, 0.5, step=0.1),
-                            'exit_on_flip': optuna.distributions.CategoricalDistribution([True]),
-                            'bb_tf': optuna.distributions.CategoricalDistribution(['3min', '5min', '15min', '30min', '1h', '4h']),
-                            'supertrend_tf': optuna.distributions.CategoricalDistribution(['15min', '30min', '1h', '4h', '8h', '1d', '1w']),
+                            'spacing_pct': optuna.distributions.FloatDistribution(**PARAM_RANGES["spacing_pct"]),
+                            'tp_pct': optuna.distributions.FloatDistribution(**PARAM_RANGES["tp_pct"]),
+                            'trailing': optuna.distributions.CategoricalDistribution(PARAM_RANGES["trailing"]),
+                            'trailing_pct': optuna.distributions.FloatDistribution(**PARAM_RANGES["trailing_pct"]),
+                            'exit_on_flip': optuna.distributions.CategoricalDistribution(PARAM_RANGES["exit_on_flip"]),
+                            'bb_tf': optuna.distributions.CategoricalDistribution(PARAM_RANGES["bb_tf"]),
+                            'supertrend_tf': optuna.distributions.CategoricalDistribution(PARAM_RANGES["supertrend_tf"]),
                         },
                         state=TrialState.COMPLETE,
                         user_attrs={'params': p, 'metrics': m}
@@ -341,10 +376,48 @@ def run_best_study(
                     study_best.add_trial(trial)
 
                 pbar.update(len(batch))
+                index = end
+                b += 1
 
+                # Pruning after every 5 batches
+                if b % 10 == 0 and b > 0:
+                    if eval_list:
+                        max_apy = max([item[1] for item in eval_list])
+                        min_dd = min([item[2] for item in eval_list])
+                        apy_threshold = 0.5 * max_apy
+                        dd_threshold = 2 * min_dd
+
+                        # Find bad values for each category
+                        bad_spacing = [k for k, v in spacing_apys.items() if np.mean(v) < apy_threshold or np.mean(spacing_dds[k]) > dd_threshold]
+                        bad_tp = [k for k, v in tp_apys.items() if np.mean(v) < apy_threshold or np.mean(tp_dds[k]) > dd_threshold]
+                        bad_trailing = [k for k, v in trailing_apys.items() if np.mean(v) < apy_threshold or np.mean(trailing_dds[k]) > dd_threshold]
+                        bad_trailing_pct = [k for k, v in trailing_pct_apys.items() if np.mean(v) < apy_threshold or np.mean(trailing_pct_dds[k]) > dd_threshold]
+                        bad_bb = [k for k, v in bb_tf_apys.items() if np.mean(v) < apy_threshold or np.mean(bb_tf_dds[k]) > dd_threshold]
+                        bad_st = [k for k, v in supertrend_tf_apys.items() if np.mean(v) < apy_threshold or np.mean(supertrend_tf_dds[k]) > dd_threshold]
+
+                        # Prune remaining params_list
+                        remaining = params_list[index:]
+                        filtered = [p for p in remaining if (
+                            p['spacing_pct'] not in bad_spacing and
+                            p['tp_pct'] not in bad_tp and
+                            p['trailing'] not in bad_trailing and
+                            p['trailing_pct'] not in bad_trailing_pct and
+                            p['bb_tf'] not in bad_bb and
+                            p['supertrend_tf'] not in bad_st
+                        )]
+                        pruned_count = len(remaining) - len(filtered)
+                        params_list = params_list[:index] + filtered  # Update params_list
+                        logging.info(f"Pruned {pruned_count} hopeless params after batch {b}")
+
+        # After loop: Handle Pareto selection
+        pareto_candidates.sort(key=lambda x: (-x['apy'], x['dd']))
+        logging.info(f"Pareto front size: {len(pareto_candidates)}")
+        selected = next((cand for cand in pareto_candidates if cand['dd'] <= max_dd_threshold), pareto_candidates[0] if pareto_candidates else None)
+        if selected:
+            logging.info(f"Selected from Pareto: APY={selected['apy']:.2f}%, DD={selected['dd']:.2f}% with params: {json.dumps(selected['params'])}")
 
     study_best.optimize(
-        make_objective(df, "annual_pct", use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, use_bb_safety=use_bb_safety),
+        make_objective(df, use_sig=use_sig, reopen_sec=reopen_sec, long_only=long_only, use_bb_safety=use_bb_safety),
         n_trials=n_trials,
         n_jobs=n_jobs,
         show_progress_bar=True,

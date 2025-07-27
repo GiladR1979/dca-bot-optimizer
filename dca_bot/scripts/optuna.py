@@ -199,8 +199,12 @@ def main() -> None:
         )
 
         def _pick(study):
-            t = study.best_trial
-            return t.user_attrs["params"], t.user_attrs["metrics"]
+            trials = study.best_trials
+            if not trials:
+                raise ValueError("No best trials found in the study.")
+            # Select the trial with the highest annual_pct (APY)
+            best_t = max(trials, key=lambda t: t.user_attrs["metrics"]["annual_pct"])
+            return best_t.user_attrs["params"], best_t.user_attrs["metrics"]
 
         best_p, _ = _pick(best_st)
 
@@ -249,8 +253,12 @@ def main() -> None:
             )
 
             def _pick(study):
-                t = study.best_trial
-                return t.user_attrs["params"], t.user_attrs["metrics"]
+                trials = study.best_trials
+                if not trials:
+                    raise ValueError("No best trials found in the study.")
+                # Select the trial with the highest annual_pct (APY)
+                best_t = max(trials, key=lambda t: t.user_attrs["metrics"]["annual_pct"])
+                return best_t.user_attrs["params"], best_t.user_attrs["metrics"]
 
             best_p, _ = _pick(best_st)
 
