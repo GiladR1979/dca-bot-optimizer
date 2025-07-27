@@ -31,27 +31,31 @@ def parse_tf_to_min(tf: str) -> int:
         return int(tf[:-1]) * 1440 * 7
     raise ValueError(f"Unknown timeframe: {tf}")
 
+
 def run_set(
-    params: Dict,
-    df,
-    label: str,
-    base: str,
-    use_sig: int,
-    reopen_sec: int,
-    long_only: bool = False,
-    exit_on_flip: bool = True,
-    use_bb_safety: bool = True,
+        params: Dict,
+        df,
+        label: str,
+        base: str,
+        use_sig: int,
+        reopen_sec: int,
+        long_only: bool = False,
+        exit_on_flip: bool = True,
+        use_bb_safety: bool = True,
 ) -> Tuple[Dict, str, Tuple]:
     """Back-test one parameter set and return (metrics, PNG path, panel item)."""
-    # Ensure all CLI parameters are properly passed to the strategy
-    bot = DCATrailingStrategy(
-        **params,  # Unpack the optimization parameters
-        use_sig=use_sig,
-        reopen_sec=reopen_sec,
-        long_only=long_only,
-        exit_on_flip=exit_on_flip,  # Make sure this isn't overridden by params
-        use_bb_safety=use_bb_safety
-    )
+
+    # Create a copy of params to avoid modifying the original
+    bot_params = params.copy()
+
+    # Override with CLI values (these take precedence)
+    bot_params['use_sig'] = use_sig
+    bot_params['reopen_sec'] = reopen_sec
+    bot_params['long_only'] = long_only
+    bot_params['exit_on_flip'] = exit_on_flip
+    bot_params['use_bb_safety'] = use_bb_safety
+
+    bot = DCATrailingStrategy(**bot_params)
     deals, eq = bot.backtest(df)
     met = calc_metrics(deals, eq)
 
@@ -60,27 +64,32 @@ def run_set(
 
     return met, png, (eq, deals, label)
 
+
 def monte_carlo_backtest(
-    df: pd.DataFrame,
-    params: Dict,
-    use_sig: int,
-    reopen_sec: int,
-    long_only: bool = False,
-    exit_on_flip: bool = True,
-    use_bb_safety: bool = True,
-    num_sims: int = 50,
-    noise_std: float = 0.001,
+        df: pd.DataFrame,
+        params: Dict,
+        use_sig: int,
+        reopen_sec: int,
+        long_only: bool = False,
+        exit_on_flip: bool = True,
+        use_bb_safety: bool = True,
+        num_sims: int = 50,  # Reduced from 100
+        noise_std: float = 0.001,  # 0.1% std dev noise
 ) -> Dict:
     """Run Monte Carlo simulations with price perturbations on GPU, in batches to avoid OOM."""
-    # Create bot with all parameters including CLI ones
-    bot = DCATrailingStrategy(
-        **params,
-        use_sig=use_sig,
-        reopen_sec=reopen_sec,
-        long_only=long_only,
-        exit_on_flip=exit_on_flip,  # Ensure this uses CLI value
-        use_bb_safety=use_bb_safety
-    )
+
+    # Create a copy of params to avoid modifying the original
+    bot_params = params.copy()
+
+    # Override with CLI values (these take precedence)
+    bot_params['use_sig'] = use_sig
+    bot_params['reopen_sec'] = reopen_sec
+    bot_params['long_only'] = long_only
+    bot_params['exit_on_flip'] = exit_on_flip
+    bot_params['use_bb_safety'] = use_bb_safety
+
+    bot = DCATrailingStrategy(**bot_params)
+
     batch_size = 20  # Process 20 sims per batch to reduce memory usage
     all_results = []
 
